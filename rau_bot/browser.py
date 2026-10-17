@@ -111,6 +111,7 @@ class Cabinet:
         Возвращает True, если заявление подписано и отправлено.
         """
         p = self.page
+        self.last_avail = []
         if inn not in p.url and "legal-cases" not in p.url:
             self.open_case(inn)
         p.get_by_role("button", name="Подать заявление об участии").click()
@@ -131,6 +132,7 @@ class Cabinet:
                 p.get_by_label("Электронная почта").nth(i).fill(one["email"])
             if check_au_balance:
                 avail = d(p.get_by_label("Доступные баллы").nth(i).input_value())
+                self.last_avail.append(str(avail))
                 if points > avail:
                     raise ValueError(f"ставка {points} больше доступных баллов АУ {avail}")
         p.get_by_role("button", name="Сохранить").click()

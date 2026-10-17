@@ -40,33 +40,44 @@ class Config:
 
 @dataclass
 class Target:
-    inn: str                  # ИНН должника
-    max_bid: Decimal          # предел ставки по этому делу
-    au: list                  # АУ для заявления: [{"fio": ...} или {"inn": ...}, ...]
+    inn: str                          # ИНН должника
+    max_bid: Decimal                  # предел ставки по делу (не выше баллов СРО и лимитов АУ)
+    au: list                          # АУ: [{"fio": ...} или {"inn": ...}, ...]
+    initial: Decimal = CENT           # стартовая ставка
+    step: Decimal | None = None       # шаг повышения (режим «физики»); None = точный минимум
 
 
 def read_targets(path: str, cfg: "Config") -> dict[str, Target]:
-    """CSV (разделитель запятая или точка с запятой), без заголовка:
-        ИНН должника, предел ставки, АУ 1, АУ 2
-    АУ: ФИО или ИНН; можно с почтой через «|»: ПАСЬКО ОЛЬГА НИКОЛАЕВНА|mail@x.ru
-    Пустые поля берутся из config.json (default_max_bid, au)."""
+    """CSV с заголовком (разделитель ; или ,). Колонки, все кроме inn необязательны:
+        inn;max_bid;initial;step;au1;au2;au_cap
+    max_bid: предел ставки; au_cap: лимит баллов на дело, который АУ согласились потратить
+    (итоговый предел = минимум из max_bid, au_cap и баллов СРО).
+    au1/au2: ФИО или ИНН; почта через «|». Пустое берётся из config.json."""
+    import csv as _csv
+    lines = [l for l in open(path, encoding="utf-8-sig").read().splitlines()
+             if l.strip() and not l.lstrip().startswith("#")]
+    delim = ";" if ";" in lines[0] else ","
     out: dict[str, Target] = {}
-    for line in open(path, encoding="utf-8-sig"):
-        line = line.strip()
-        if not line or not line[0].isdigit():
+    for r in _csv.DictReader(lines, delimiter=delim):
+        r = {k.strip().lower(): (v or "").strip() for k, v in r.items() if k}
+        inn = r.get("inn", "")
+        if not inn.isdigit():
             continue
-        row = [c.strip() for c in line.split(";" if ";" in line else ",")]
-        cap = d(row[1]) if len(row) > 1 and row[1] else cfg.default_max_bid
+        caps = [cfg.default_max_bid]
+        for key in ("max_bid", "au_cap"):
+            if r.get(key):
+                caps.append(d(r[key]))
         au = []
-        for cell in row[2:4]:
-            if not cell:
-                continue
-            fio, _, mail = cell.partition("|")
-            item = {"inn": fio} if fio.isdigit() else {"fio": fio}
-            if mail:
-                item["email"] = mail
-            au.append(item)
-        out[row[0]] = Target(row[0], min(cap, cfg.default_max_bid), au or cfg.au)
+        for key in ("au1", "au2", "au3", "au4"):
+            if r.get(key):
+                fio, _, mail = r[key].partition("|")
+                item = {"inn": fio} if fio.isdigit() else {"fio": fio}
+                if mail:
+                    item["email"] = mail
+                au.append(item)
+        out[inn] = Target(inn, min(caps), au or cfg.au,
+                          d(r["initial"]) if r.get("initial") else cfg.initial_points,
+                          d(r["step"]) if r.get("step") else None)
     return out
 
 
@@ -117,12 +128,12 @@ class Watcher:
 
         if ours is None:
             if cfg.place_initial and left > cfg.final_window_min * 60:
-                self._send(t, cfg.initial_points, "initial")
+                self._send(t, t.initial, "initial")
                 return "slow"
         if left > cfg.final_window_min * 60:
             return "slow"                    # ждём финального окна
 
-        dec = decide(ours, rivals, t.max_bid - cfg.extra_margin)
+        dec = decide(ours, rivals, t.max_bid - cfg.extra_margin, t.initial, t.step)
         self.j.write(inn=inn, event=dec.action, points=dec.points or "", detail=dec.reason)
         if dec.action == "bid":
             self._send(t, dec.points + cfg.extra_margin, "bid")
@@ -132,8 +143,10 @@ class Watcher:
         inn = t.inn
         ok = self.cab.create_and_send(inn, points, t.au, self.cfg.dry_run,
                                       self.cfg.check_au_balance)
-        self.j.write(inn=inn, event=f"{kind}_sent" if ok else f"{kind}_prepared",
-                     points=points, detail="подписано" if ok else "dry-run: не подписано")
+        avail = getattr(self.cab, "last_avail", None)   # «Доступные баллы» АУ после заморозки
+        self.j.write(inn=inn, event=f"{kind}_sent" if ok else f"{kind}_prepared", points=points,
+                     detail=("подписано" if ok else "dry-run: не подписано")
+                     + (f"; баллы АУ в форме: {avail}" if avail else ""))
         self.our_bid[inn] = points if ok else self.our_bid.get(inn)
 
 

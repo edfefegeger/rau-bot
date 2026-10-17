@@ -108,12 +108,31 @@ def test_finished(tmp_path):
 
 def test_read_targets(tmp_path):
     f = tmp_path / "t.csv"
-    f.write_text("# коммент\n7820069323;150;ПАСЬКО ОЛЬГА НИКОЛАЕВНА;221002325484|a@b.ru\n"
-                 "4705064314\n9999999999;5000\n", encoding="utf-8")
+    f.write_text("# коммент\n"
+                 "inn;max_bid;initial;step;au1;au2;au_cap\n"
+                 "7820069323;150;;;ПАСЬКО ОЛЬГА НИКОЛАЕВНА;221002325484|a@b.ru;100\n"
+                 "4705064314;;;;;;\n"
+                 "9999999999;5000;;;;;\n"
+                 "1111111111;5;0.1;0.5;;;\n", encoding="utf-8")
     cfg = Config(au=[{"fio": "ПО УМОЛЧАНИЮ"}])
     t = read_targets(str(f), cfg)
-    assert t["7820069323"].max_bid == D("150")
+    assert t["7820069323"].max_bid == D("100")             # минимум из 150 и лимита АУ 100
     assert t["7820069323"].au == [{"fio": "ПАСЬКО ОЛЬГА НИКОЛАЕВНА"},
                                   {"inn": "221002325484", "email": "a@b.ru"}]
     assert t["4705064314"].max_bid == D("805") and t["4705064314"].au == cfg.au
-    assert t["9999999999"].max_bid == D("805")           # больше баллов СРО не ставим
+    assert t["9999999999"].max_bid == D("805")             # больше баллов СРО не ставим
+    ph = t["1111111111"]
+    assert (ph.max_bid, ph.initial, ph.step) == (D("5"), D("0.1"), D("0.5"))
+
+
+def test_step_mode_rounds_up_to_grid_and_respects_cap(tmp_path):
+    # конкуренты 3 / 3,1 / 7: точный минимум 14,92. Сетка 0,1 + k*0,5 -> 15,1
+    from rau_bot.calc import decide
+    r = [D("3"), D("3.1"), D("7")]
+    dec = decide(None, r, D("100"), D("0.1"), D("0.5"))
+    assert dec.points == D("15.1")
+    # предел 5 баллов (физики): нужно больше -> не ставим
+    assert decide(None, r, D("5"), D("0.1"), D("0.5")).action == "over_cap"
+    # небольшие ставки конкурентов: укладываемся в предел
+    small = [D("0.1"), D("0.2")]
+    assert decide(None, small, D("5"), D("0.1"), D("0.5")).points <= D("5")

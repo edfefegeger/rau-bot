@@ -98,6 +98,14 @@ def min_bid(competitors: list[Decimal]) -> BidPlan:
     raise RuntimeError("min_bid: не удалось подобрать ставку")
 
 
+def round_up_to_grid(x: Decimal, start: Decimal, step: Decimal) -> Decimal:
+    """Ближайшая вверх ставка вида start + k*step (режим «стартовая ставка и шаг»)."""
+    if x <= start:
+        return start
+    k = ((x - start) / step).to_integral_value(ROUND_CEILING)
+    return start + k * step
+
+
 @dataclass(frozen=True)
 class Decision:
     action: str              # 'bid' | 'keep' | 'over_cap'
@@ -107,9 +115,17 @@ class Decision:
 
 
 def decide(our_current: Decimal | None, competitors: list[Decimal],
-           max_bid: Decimal) -> Decision:
-    """Что делать сейчас. Ставки можно только повышать, поэтому понижать не пытаемся."""
+           max_bid: Decimal, start: Decimal | None = None,
+           step: Decimal | None = None) -> Decision:
+    """Что делать сейчас. Ставки можно только повышать, поэтому понижать не пытаемся.
+
+    start/step: если заданы, ставка округляется вверх до start + k*step
+    (так бот «перебивает» конкурентов с заданным шагом, но не выше max_bid).
+    """
     plan = min_bid(competitors)
+    if step:
+        plan = BidPlan(round_up_to_grid(plan.points, start or CENT, step), plan.participants,
+                       plan.avg_exact, plan.avg_rounded, plan.strongest)
     if our_current is not None and our_current >= plan.points:
         return Decision("keep", None, plan,
                         f"наша ставка {our_current} уже не ниже нужной {plan.points}")
