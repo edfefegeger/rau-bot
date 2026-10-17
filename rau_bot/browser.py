@@ -63,18 +63,60 @@ def parse_case_text(text: str, tz: str = "Europe/Moscow") -> tuple[datetime | No
 
 # --- управление страницей ----------------------------------------------------
 
+_CONTROLS_JS = """() => {
+  const out = [];
+  document.querySelectorAll('button, a, input, select, textarea, [role=button], label').forEach(e => {
+    const r = e.getBoundingClientRect();
+    out.push({tag: e.tagName.toLowerCase(), type: e.type || '', text: (e.innerText || '').trim().slice(0, 80),
+              id: e.id || '', name: e.name || '', placeholder: e.placeholder || '',
+              aria: e.getAttribute('aria-label') || '', value: (e.value || '').toString().slice(0, 60),
+              visible: r.width > 0 && r.height > 0});
+  });
+  return out;
+}"""
+
+
 class Cabinet:
-    def __init__(self, cdp_url: str = "http://127.0.0.1:9222", tz: str = "Europe/Moscow"):
+    def __init__(self, cdp_url: str = "http://127.0.0.1:9222", tz: str = "Europe/Moscow",
+                 debug_dir: str = "debug", attach: bool = False):
+        """attach=True: работать в уже открытой вкладке (для команды inspect)."""
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        self._browser = self._pw.chromium.connect_over_cdp(cdp_url)
+        try:
+            self._browser = self._pw.chromium.connect_over_cdp(cdp_url)
+        except Exception as e:
+            self._pw.stop()
+            raise SystemExit(
+                f"Не удалось подключиться к браузеру ({cdp_url}): {str(e).splitlines()[0]}\n"
+                "Запустите браузер командой  python launcher.py browser  (все окна браузера "
+                "перед этим закрыть), войдите в кабинет и повторите.") from None
         ctx = self._browser.contexts[0]
-        self.page = ctx.new_page()
+        self._own = not attach
+        self.page = ctx.pages[-1] if attach and ctx.pages else ctx.new_page()
         self.tz = tz
+        self.debug_dir = debug_dir
+        self.last_avail: list[str] = []
+        self.page.set_default_timeout(20000)
 
     def close(self):
-        self.page.close()
+        if self._own:
+            self.page.close()
         self._pw.stop()
+
+    def snapshot(self, name: str) -> str:
+        """Скриншот + текст + список кнопок и полей текущей страницы в папку debug/.
+        Нужен, чтобы быстро поправить локаторы, если сайт устроен не так, как на скриншотах."""
+        import json, os, time
+        os.makedirs(self.debug_dir, exist_ok=True)
+        base = os.path.join(self.debug_dir, f"{time.strftime('%H%M%S')}_{name}")
+        try:
+            self.page.screenshot(path=base + ".png", full_page=True)
+            open(base + ".txt", "w", encoding="utf8").write(self.page.inner_text("body"))
+            json.dump(self.page.evaluate(_CONTROLS_JS), open(base + ".controls.json", "w", encoding="utf8"),
+                      ensure_ascii=False, indent=1)
+        except Exception as e:  # отладка не должна ронять работу
+            print("snapshot не удался:", e)
+        return base
 
     def _goto_search(self):
         self.page.goto(SEARCH_URL)
@@ -112,14 +154,25 @@ class Cabinet:
         """
         p = self.page
         self.last_avail = []
+        try:
+            return self._fill_and_send(inn, points, au, dry_run, check_au_balance)
+        except Exception:
+            self.snapshot(f"error_{inn}")
+            raise
+
+    def _fill_and_send(self, inn, points, au, dry_run, check_au_balance) -> bool:
+        p = self.page
         if inn not in p.url and "legal-cases" not in p.url:
             self.open_case(inn)
+        self.snapshot(f"{inn}_0_case")
         p.get_by_role("button", name="Подать заявление об участии").click()
+        self.snapshot(f"{inn}_1_step1")
         # шаг 1: дело — просто «Далее»
         p.get_by_role("button", name="Далее").first.click()
         # шаг 2: баллы (запятая как десятичный разделитель, как в форме)
         p.get_by_label(re.compile("Количество баллов")).fill(str(points).replace(".", ","))
         p.get_by_role("button", name="Далее").first.click()
+        self.snapshot(f"{inn}_2_step3")
         # шаг 3: АУ по ФИО или ИНН
         for i, one in enumerate(au):
             if i > 0:
@@ -135,8 +188,10 @@ class Cabinet:
                 self.last_avail.append(str(avail))
                 if points > avail:
                     raise ValueError(f"ставка {points} больше доступных баллов АУ {avail}")
+        self.snapshot(f"{inn}_3_before_save")
         p.get_by_role("button", name="Сохранить").click()
         p.wait_for_load_state("networkidle")
+        self.snapshot(f"{inn}_4_saved")
         if dry_run:
             return False
         p.get_by_role("button", name="Подписать и отправить").click()
@@ -145,4 +200,5 @@ class Cabinet:
         p.locator("text=Выберите сертификат").locator("xpath=..").get_by_text(
             re.compile("Представитель|Действителен")).first.click()
         p.get_by_text(re.compile("успешно подписано и отправлено")).wait_for(timeout=30000)
+        self.snapshot(f"{inn}_5_signed")
         return True

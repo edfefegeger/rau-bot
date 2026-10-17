@@ -66,7 +66,7 @@ def T(cap):
 def make(tmp_path, end, bids, dry_run=False):
     now = datetime(2026, 10, 19, 11, 0, tzinfo=TZ)
     cab = FakeCabinet(end, bids)
-    cfg = Config(dry_run=dry_run, journal=str(tmp_path / "j.csv"))
+    cfg = Config(dry_run=dry_run, journal=str(tmp_path / "j.csv"), bid_not_before_s=0)
     return cab, Watcher(cfg, cab, Journal(cfg.journal), now=lambda: now)
 
 
@@ -136,3 +136,18 @@ def test_step_mode_rounds_up_to_grid_and_respects_cap(tmp_path):
     # небольшие ставки конкурентов: укладываемся в предел
     small = [D("0.1"), D("0.2")]
     assert decide(None, small, D("5"), D("0.1"), D("0.5")).points <= D("5")
+
+
+def test_no_bid_until_last_seconds(tmp_path):
+    """Экономия баллов: расчётную ставку подаём только в последние bid_not_before_s секунд."""
+    rivals = [Application("1", D("3")), Application("2", D("7"))]
+    now = datetime(2026, 10, 19, 11, 0, tzinfo=TZ)
+    cab = FakeCabinet(datetime(2026, 10, 19, 11, 8, tzinfo=TZ), rivals)   # осталось 8 мин
+    cab.bids.append(Application(OUR, D("0.01")))                            # у нас уже 0,01
+    cfg = Config(dry_run=False, journal=str(tmp_path / "j.csv"), bid_not_before_s=180)
+    w = Watcher(cfg, cab, Journal(cfg.journal), now=lambda: now)
+    assert w.step(T(D("100"))) == "fast"
+    assert cab.sent == []                                  # 8 мин > 3 мин: ждём
+    cab.end = datetime(2026, 10, 19, 11, 2, tzinfo=TZ)     # осталось 2 мин
+    w.step(T(D("100")))
+    assert len(cab.sent) == 1

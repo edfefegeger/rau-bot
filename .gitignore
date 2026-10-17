@@ -1,0 +1,14 @@
+# Local configuration and target data
+/config.json
+/targets.csv
+
+# Runtime data
+/journal.csv
+/debug/
+/browser_profile/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/

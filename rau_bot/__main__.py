@@ -2,6 +2,8 @@
   python -m rau_bot check                     проверка расчёта на протоколах из tests/data
   python -m rau_bot calc 0.02 10 15 200       ставка при баллах конкурентов
   python -m rau_bot dump <ИНН должника>       сохранить страницу дела для отладки
+  python -m rau_bot inspect <имя>             снимок текущей вкладки браузера (скриншот, текст, поля) в debug/
+  python -m rau_bot selftest                  проверка связи с браузером и входа в кабинет
   python -m rau_bot run config.json targets.csv
 """
 import sys
@@ -34,6 +36,21 @@ def main(argv):
         cab = Cabinet(cfg.cdp_url, cfg.tz)
         info = cab.dump(argv[2], f"dump_{argv[2]}")
         print("срок:", info.period_end, "ставок:", len(info.bids))
+        cab.close()
+    elif cmd == "inspect":
+        from .browser import Cabinet
+        cab = Cabinet(attach=True)
+        print("сохранено:", cab.snapshot(argv[2] if len(argv) > 2 else "page"))
+        cab.close()
+    elif cmd == "selftest":
+        from .browser import Cabinet
+        cab = Cabinet()
+        cab.page.goto("https://rau.nalog.gov.ru/legal-cases")
+        cab.page.wait_for_load_state("networkidle")
+        text = cab.page.inner_text("body")
+        print("страница открыта:", cab.page.title())
+        print("вход выполнен:", "ПАСЬКО" in text.upper() or "Баллы" in text)
+        print("снимок:", cab.snapshot("selftest"))
         cab.close()
     elif cmd == "run":
         from .runner import Config, read_targets, run

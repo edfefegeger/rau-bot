@@ -20,6 +20,8 @@ class Config:
     place_initial: bool = True              # сразу подать 0,01, чтобы быть участником
     initial_points: Decimal = CENT
     final_window_min: int = 10              # за сколько минут до конца включаем быстрый режим
+    bid_not_before_s: int = 180             # расчётную ставку подаём не раньше, чем за столько секунд до конца (0 = сразу)
+                                            # (экономия баллов: конкуренты ставят в конце, мы после них)
     poll_slow_s: int = 120
     poll_fast_s: int = 15
     extra_margin: Decimal = Decimal("0")    # запас баллов сверху к расчётному минимуму
@@ -134,6 +136,8 @@ class Watcher:
             return "slow"                    # ждём финального окна
 
         dec = decide(ours, rivals, t.max_bid - cfg.extra_margin, t.initial, t.step)
+        if cfg.bid_not_before_s and left > cfg.bid_not_before_s:
+            return "fast"                    # смотрим, но ещё не ставим
         self.j.write(inn=inn, event=dec.action, points=dec.points or "", detail=dec.reason)
         if dec.action == "bid":
             self._send(t, dec.points + cfg.extra_margin, "bid")
@@ -153,6 +157,8 @@ class Watcher:
 def run(cfg: Config, targets: dict[str, "Target"]):
     from .browser import Cabinet
     cab = Cabinet(cfg.cdp_url, cfg.tz)
+    print(f"Бот запущен. Дел: {len(targets)}. Режим: "
+          f"{'ТРЕНИРОВКА (без подписи)' if cfg.dry_run else 'БОЕВОЙ (подписывает)'}. Остановка: Ctrl+C")
     w = Watcher(cfg, cab, Journal(cfg.journal))
     active = dict(targets)
     try:
@@ -167,5 +173,7 @@ def run(cfg: Config, targets: dict[str, "Target"]):
                 except Exception as e:      # ошибка по одному делу не должна ронять остальные
                     w.j.write(inn=inn, event="error", detail=repr(e))
             time.sleep(cfg.poll_fast_s if fast else cfg.poll_slow_s)
+    except KeyboardInterrupt:
+        print("Остановлено.")
     finally:
         cab.close()
