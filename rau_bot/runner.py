@@ -7,9 +7,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
-from .calc import CENT, Application, d, decide, effective_bids
+from .calc import CENT, Application, d, decide, effective_bids, get_tz
 
 
 @dataclass
@@ -33,7 +32,11 @@ class Config:
 
     @classmethod
     def load(cls, path: str) -> "Config":
-        raw = json.load(open(path, encoding="utf8"))
+        return cls.load_dict(json.load(open(path, encoding="utf8")))
+
+    @classmethod
+    def load_dict(cls, raw: dict) -> "Config":
+        raw = dict(raw)
         for k in ("initial_points", "extra_margin", "default_max_bid"):
             if k in raw:
                 raw[k] = d(raw[k])
@@ -108,7 +111,7 @@ class Watcher:
 
     def __init__(self, cfg: Config, cabinet, journal: Journal, now=None):
         self.cfg, self.cab, self.j = cfg, cabinet, journal
-        self.now = now or (lambda: datetime.now(ZoneInfo(cfg.tz)))
+        self.now = now or (lambda: datetime.now(get_tz(cfg.tz)))
         self.our_bid: dict[str, Decimal | None] = {}
 
     def step(self, t: "Target") -> str:

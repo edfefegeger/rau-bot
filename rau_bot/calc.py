@@ -16,9 +16,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta, timezone, tzinfo
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
+from zoneinfo import ZoneInfo
 
 CENT = Decimal("0.01")
+
+
+def get_tz(name: str) -> tzinfo:
+    """Часовой пояс; на Windows без пакета tzdata Europe/Moscow не находится: тогда UTC+3 (в России без перехода на летнее время)."""
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001
+        if name in ("Europe/Moscow", "Europe/Minsk"):
+            return timezone(timedelta(hours=3), name)
+        raise
 
 
 def d(x) -> Decimal:

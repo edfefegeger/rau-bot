@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Единый запуск для Windows / Linux / macOS (вместо .bat и .sh).
 
+  python launcher.py                      ПАНЕЛЬ УПРАВЛЕНИЯ в браузере (кнопки вместо команд), то же: start.bat / ./start.sh
+
+  python launcher.py                      ПАНЕЛЬ УПРАВЛЕНИЯ в браузере (кнопки вместо команд)
+
   python launcher.py install              создать .venv и установить пакеты (один раз)
   python launcher.py install --system     запасной вариант без venv (pip --user --break-system-packages)
   python launcher.py browser                  НОВОЕ окно браузера с отладочным портом, отдельный профиль
@@ -154,7 +158,9 @@ def start_browser(use_profile=True):
 
 def main(argv):
     os.chdir(HERE)
-    if len(argv) < 2 or argv[1] in ("-h", "--help", "help"):
+    if len(argv) < 2 or argv[1] == "panel":
+        return subprocess.call([venv_python(), os.path.join(HERE, "panel.py"), *argv[2:]])
+    if argv[1] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
     cmd, rest = argv[1], argv[2:]
@@ -170,7 +176,9 @@ def main(argv):
                   "1) Закройте все окна браузера  2) python3 launcher.py browser\n"
                   "3) войдите в кабинет РАУ через МЧД  4) снова python3 launcher.py run")
             return 1
-        return subprocess.call([venv_python(), "-m", "rau_bot", "run", "config.json", "targets.csv"])
+        cfg = rest[0] if rest else "config.json"
+        targets = rest[1] if len(rest) > 1 else "targets.csv"
+        return subprocess.call([venv_python(), "-m", "rau_bot", "run", cfg, targets])
     if venv_python() == sys.executable:
         print("(!) Нет рабочего .venv: сначала выполните  python3 launcher.py install")
     if cmd in ("selftest", "dump", "inspect") and not port_open():

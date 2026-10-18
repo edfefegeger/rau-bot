@@ -14,9 +14,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
-from .calc import Application, d
+from .calc import Application, d, get_tz
 
 BASE = "https://rau.nalog.gov.ru"
 SEARCH_URL = f"{BASE}/legal-cases"  # «Площадка выбора АУ», точный адрес сверить
@@ -55,7 +54,7 @@ def parse_case_text(text: str, tz: str = "Europe/Moscow") -> tuple[datetime | No
     end = None
     m = _PERIOD.search(block)
     if m:
-        end = datetime.strptime(m.group(2), "%d.%m.%Y %H:%M").replace(tzinfo=ZoneInfo(tz))
+        end = datetime.strptime(m.group(2), "%d.%m.%Y %H:%M").replace(tzinfo=get_tz(tz))
     apps = [Application(sro_inn=p["inn"], points=d(p["pts"]), name=p["name"])
             for p in _PARTICIPANT.finditer(block)]
     return end, apps
@@ -88,11 +87,17 @@ class Cabinet:
             self._pw.stop()
             raise SystemExit(
                 f"Не удалось подключиться к браузеру ({cdp_url}): {str(e).splitlines()[0]}\n"
-                "Запустите браузер командой  python launcher.py browser  (все окна браузера "
-                "перед этим закрыть), войдите в кабинет и повторите.") from None
+                "Откройте браузер кнопкой «Открыть браузер» в панели (или python launcher.py browser), "
+                "войдите в кабинет и повторите.") from None
         ctx = self._browser.contexts[0]
-        self._own = not attach
-        self.page = ctx.pages[-1] if attach and ctx.pages else ctx.new_page()
+        rau = [pg for pg in ctx.pages if "rau.nalog.gov.ru" in pg.url]
+        if attach and ctx.pages:
+            self.page, self._own = ctx.pages[-1], False
+        elif rau:                       # работаем во вкладке, где вы уже вошли в кабинет
+            self.page, self._own = rau[-1], False
+        else:
+            self.page, self._own = ctx.new_page(), True
+            self.page.goto(BASE)
         self.tz = tz
         self.debug_dir = debug_dir
         self.last_avail: list[str] = []
@@ -111,7 +116,7 @@ class Cabinet:
         base = os.path.join(self.debug_dir, f"{time.strftime('%H%M%S')}_{name}")
         try:
             self.page.screenshot(path=base + ".png", full_page=True)
-            open(base + ".txt", "w", encoding="utf8").write(self.page.inner_text("body"))
+            open(base + ".txt", "w", encoding="utf8").write(self.page.url + "\n" + self.page.inner_text("body"))
             json.dump(self.page.evaluate(_CONTROLS_JS), open(base + ".controls.json", "w", encoding="utf8"),
                       ensure_ascii=False, indent=1)
         except Exception as e:  # отладка не должна ронять работу
@@ -119,20 +124,46 @@ class Cabinet:
         return base
 
     def _goto_search(self):
-        self.page.goto(SEARCH_URL)
-        self.page.wait_for_load_state("networkidle")
+        """Страница «Площадка выбора АУ» (адрес не зашиваем: идём по пункту меню)."""
+        p = self.page
+        if p.get_by_label(re.compile("ФИО/Наименование")).count() == 0:
+            item = p.get_by_text("Площадка выбора АУ", exact=True)
+            vis = item.locator("visible=true")
+            if vis.count():
+                vis.first.click()
+            else:                       # подпись меню на странице есть, но скрыта стилями: нажимаем программно
+                self.snapshot("menu_hidden")
+                item.first.dispatch_event("click")
+            p.wait_for_load_state("networkidle")
+        p.get_by_label(re.compile("ФИО/Наименование")).wait_for()
+
+    def _search(self, inn: str):
+        p = self.page
+        self._goto_search()
+        p.get_by_label(re.compile("ФИО/Наименование")).fill(inn)
+        p.get_by_role("button", name="Найти", exact=True).click()
+        p.wait_for_load_state("networkidle")
+        link = p.locator("a", has_text=re.compile(r"^(Без номера|[А-ЯA-Z0-9\-/]+)$")).first
+        try:
+            link.wait_for(timeout=10000)
+        except Exception:
+            self.snapshot(f"not_found_{inn}")
+            raise LookupError(f"дело с ИНН {inn} не найдено среди активных процедур (проверьте ИНН)") from None
 
     def open_case(self, inn: str) -> CaseInfo:
         p = self.page
-        self._goto_search()
-        field = p.get_by_label(re.compile("ИНН/ОГРН"))  # поле поиска по должнику
-        field.fill(inn)
-        p.get_by_role("button", name="Найти").click()
+        self._search(inn)
+        p.locator("a", has_text=re.compile(r"^(Без номера|[А-ЯA-Z0-9\-/]+)$")).first.click()
         p.wait_for_load_state("networkidle")
-        p.get_by_role("link", name=re.compile(r"^(Без номера|[A-ZА-Я0-9\-/]+)$")).first.click()
-        p.wait_for_load_state("networkidle")
+        p.get_by_text("Ход процедуры выбора").wait_for()
+        try:                                    # блок процедур подгружается позже заголовка
+            p.get_by_text("Период проведения").first.wait_for(timeout=15000)
+        except Exception:
+            pass
         text = p.inner_text("body")
         end, bids = parse_case_text(text, self.tz)
+        if end is None:
+            self.snapshot(f"no_period_{inn}")
         return CaseInfo(inn, p.url, end, bids, text)
 
     def dump(self, inn: str, out_prefix: str):
@@ -162,10 +193,10 @@ class Cabinet:
 
     def _fill_and_send(self, inn, points, au, dry_run, check_au_balance) -> bool:
         p = self.page
-        if inn not in p.url and "legal-cases" not in p.url:
-            self.open_case(inn)
-        self.snapshot(f"{inn}_0_case")
-        p.get_by_role("button", name="Подать заявление об участии").click()
+        self._search(inn)          # ссылка «Подать заявление об участии» есть в карточке дела в результатах поиска
+        self.snapshot(f"{inn}_0_search")
+        p.get_by_text("Подать заявление об участии").first.click()
+        p.wait_for_load_state("networkidle")
         self.snapshot(f"{inn}_1_step1")
         # шаг 1: дело — просто «Далее»
         p.get_by_role("button", name="Далее").first.click()

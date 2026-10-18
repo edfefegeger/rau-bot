@@ -151,3 +151,14 @@ def test_no_bid_until_last_seconds(tmp_path):
     cab.end = datetime(2026, 10, 19, 11, 2, tzinfo=TZ)     # осталось 2 мин
     w.step(T(D("100")))
     assert len(cab.sent) == 1
+
+
+def test_parse_real_case_page():
+    """Реальная страница дела (снята с площадки): повторные ставки одной СРО, берём наибольшую."""
+    from pathlib import Path
+    from rau_bot.calc import effective_bids
+    text = (Path(__file__).parent / "data" / "case_uchastniki.txt").read_text(encoding="utf-8")
+    end, apps = parse_case_text(text)
+    assert end == datetime(2026, 10, 19, 12, 0, tzinfo=TZ)
+    assert len(apps) == 5
+    assert effective_bids(apps) == {"7714402935": D("7.5"), "7703392442": D("7")}
