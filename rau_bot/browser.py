@@ -18,7 +18,7 @@ from decimal import Decimal
 from .calc import Application, d, get_tz
 
 BASE = "https://rau.nalog.gov.ru"
-SEARCH_URL = f"{BASE}/legal-cases"  # «Площадка выбора АУ», точный адрес сверить
+SEARCH_URL = f"{BASE}/lk/bankruptcy-case-choice/legal-cases"  # «Площадка выбора АУ» (адрес дела: .../legal-cases/<id>)
 
 
 @dataclass
@@ -123,24 +123,33 @@ class Cabinet:
             print("snapshot не удался:", e)
         return base
 
-    def _goto_search(self):
-        """Страница «Площадка выбора АУ» (адрес не зашиваем: идём по пункту меню)."""
+    def _inn_field(self):
+        """Поле «ФИО/Наименование, ИНН/ОГРН/ОГРНИП должника»: по подписи, иначе второе поле поиска на странице."""
         p = self.page
-        if p.get_by_label(re.compile("ФИО/Наименование")).count() == 0:
-            item = p.get_by_text("Площадка выбора АУ", exact=True)
-            vis = item.locator("visible=true")
-            if vis.count():
-                vis.first.click()
-            else:                       # подпись меню на странице есть, но скрыта стилями: нажимаем программно
-                self.snapshot("menu_hidden")
-                item.first.dispatch_event("click")
+        loc = p.locator("xpath=//label[contains(normalize-space(.),'ФИО/Наименование')]/following::input[1]")
+        return loc if loc.count() else p.locator("input[type=search]").nth(1)
+
+    def _goto_search(self):
+        """Страница «Площадка выбора АУ»: по адресу, запасной путь через меню."""
+        p = self.page
+        if p.get_by_text("ФИО/Наименование").count() == 0:
+            p.goto(SEARCH_URL)
             p.wait_for_load_state("networkidle")
-        p.get_by_label(re.compile("ФИО/Наименование")).wait_for()
+        if p.get_by_text("ФИО/Наименование").count() == 0:
+            item = p.get_by_text("Площадка выбора АУ", exact=True).locator("visible=true")
+            if item.count():
+                item.first.hover()
+                item.last.click()
+        try:
+            p.get_by_text("ФИО/Наименование").first.wait_for(timeout=15000)
+        except Exception:
+            self.snapshot("search_form_missing")
+            raise LookupError("не открылась страница поиска «Площадка выбора АУ»") from None
 
     def _search(self, inn: str):
         p = self.page
         self._goto_search()
-        p.get_by_label(re.compile("ФИО/Наименование")).fill(inn)
+        self._inn_field().fill(inn)
         p.get_by_role("button", name="Найти", exact=True).click()
         p.wait_for_load_state("networkidle")
         link = p.locator("a", has_text=re.compile(r"^(Без номера|[А-ЯA-Z0-9\-/]+)$")).first
