@@ -113,6 +113,8 @@ class Watcher:
         self.cfg, self.cab, self.j = cfg, cabinet, journal
         self.now = now or (lambda: datetime.now(get_tz(cfg.tz)))
         self.our_bid: dict[str, Decimal | None] = {}
+        self.end: dict[str, datetime] = {}      # срок окончания приёма по делу (для расписания)
+        self.extra_lead_s = 0                   # добавка к bid_not_before_s на очередь из многих дел
 
     def step(self, t: "Target") -> str:
         """'done' приём закончен, 'slow' ждём, 'fast' идёт финальное окно."""
@@ -121,6 +123,7 @@ class Watcher:
         if info.period_end is None:
             self.j.write(inn=inn, event="error", detail="не найден срок окончания")
             return "slow"
+        self.end[inn] = info.period_end
         left = (info.period_end - self.now()).total_seconds()
         if left <= 0:
             self.j.write(inn=inn, event="finished", detail=f"срок вышел {info.period_end}")
@@ -139,7 +142,7 @@ class Watcher:
             return "slow"                    # ждём финального окна
 
         dec = decide(ours, rivals, t.max_bid - cfg.extra_margin, t.initial, t.step)
-        if cfg.bid_not_before_s and left > cfg.bid_not_before_s:
+        if cfg.bid_not_before_s and left > cfg.bid_not_before_s + self.extra_lead_s:
             return "fast"                    # смотрим, но ещё не ставим
         self.j.write(inn=inn, event=dec.action, points=dec.points or "", detail=dec.reason)
         if dec.action == "bid":
@@ -157,6 +160,20 @@ class Watcher:
         self.our_bid[inn] = points if ok else self.our_bid.get(inn)
 
 
+def next_delay(left_s: float, cfg: Config) -> float:
+    """Через сколько секунд снова смотреть дело, если до конца приёма left_s секунд."""
+    if left_s > 3600:
+        return max(cfg.poll_slow_s, 600)          # до конца далеко: раз в 10 минут
+    if left_s > cfg.final_window_min * 60:
+        return cfg.poll_slow_s
+    return cfg.poll_fast_s
+
+
+def lead_for_queue(n_in_window: int, step_s: float = 20.0) -> float:
+    """Запас времени на очередь: дел в финальном окне много, а бот обрабатывает их по одному."""
+    return max(0, n_in_window - 1) * step_s
+
+
 def run(cfg: Config, targets: dict[str, "Target"]):
     from .browser import Cabinet
     cab = Cabinet(cfg.cdp_url, cfg.tz)
@@ -164,18 +181,32 @@ def run(cfg: Config, targets: dict[str, "Target"]):
           f"{'ТРЕНИРОВКА (без подписи)' if cfg.dry_run else 'БОЕВОЙ (подписывает)'}. Остановка: Ctrl+C")
     w = Watcher(cfg, cab, Journal(cfg.journal))
     active = dict(targets)
+    due = {inn: 0.0 for inn in active}              # когда в следующий раз смотреть (time.monotonic)
     try:
         while active:
-            fast = False
-            for inn, t in list(active.items()):
+            now = time.monotonic()
+            ready = [inn for inn in active if due[inn] <= now]
+            # дела, у которых конец ближе, обрабатываем первыми
+            ready.sort(key=lambda i: w.end.get(i).timestamp() if w.end.get(i) else 0)
+            in_window = [i for i in active if w.end.get(i) and
+                         (w.end[i] - w.now()).total_seconds() <= cfg.final_window_min * 60]
+            w.extra_lead_s = lead_for_queue(len(in_window))
+            for inn in ready:
+                t = active[inn]
+                t0 = time.monotonic()
                 try:
                     state = w.step(t)
-                    if state == "done":
-                        del active[inn]
-                    fast = fast or state == "fast"
                 except Exception as e:      # ошибка по одному делу не должна ронять остальные
                     w.j.write(inn=inn, event="error", detail=repr(e))
-            time.sleep(cfg.poll_fast_s if fast else cfg.poll_slow_s)
+                    due[inn] = time.monotonic() + cfg.poll_fast_s
+                    continue
+                if state == "done":
+                    del active[inn]
+                    continue
+                left = (w.end[inn] - w.now()).total_seconds() if inn in w.end else 0
+                due[inn] = time.monotonic() + next_delay(left, cfg)
+            if active:
+                time.sleep(max(1.0, min(due.values()) - time.monotonic()))
     except KeyboardInterrupt:
         print("Остановлено.")
     finally:

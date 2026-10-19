@@ -162,3 +162,27 @@ def test_parse_real_case_page():
     assert end == datetime(2026, 10, 19, 12, 0, tzinfo=TZ)
     assert len(apps) == 5
     assert effective_bids(apps) == {"7714402935": D("7.5"), "7703392442": D("7")}
+
+
+def test_schedule_delays_and_queue_lead():
+    from rau_bot.runner import lead_for_queue, next_delay
+    cfg = Config()
+    assert next_delay(5 * 3600, cfg) == 600          # далеко: редко
+    assert next_delay(1800, cfg) == cfg.poll_slow_s
+    assert next_delay(300, cfg) == cfg.poll_fast_s   # финальное окно: часто
+    assert lead_for_queue(1) == 0 and lead_for_queue(11) == 200
+
+
+def test_queue_lead_moves_bid_earlier(tmp_path):
+    """Много дел в финальном окне: ставку начинаем раньше, чтобы успеть всех."""
+    rivals = [Application("1", D("3")), Application("2", D("7"))]
+    now = datetime(2026, 10, 19, 11, 0, tzinfo=TZ)
+    cab = FakeCabinet(datetime(2026, 10, 19, 11, 5, tzinfo=TZ), rivals)   # осталось 300 с
+    cab.bids.append(Application(OUR, D("0.01")))
+    cfg = Config(dry_run=False, journal=str(tmp_path / "j.csv"), bid_not_before_s=180)
+    w = Watcher(cfg, cab, Journal(cfg.journal), now=lambda: now)
+    w.step(T(D("100")))
+    assert cab.sent == []                  # 300 > 180: ждём
+    w.extra_lead_s = 200                   # очередь из 11 дел
+    w.step(T(D("100")))
+    assert len(cab.sent) == 1              # 300 <= 180+200: начинаем
