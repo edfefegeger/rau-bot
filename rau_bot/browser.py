@@ -189,7 +189,7 @@ class Cabinet:
         check_au_balance: если ставка больше «Доступных баллов» любого из выбранных АУ,
         заявление не отправляется (исключение). Точное правило площадки уточнить.
 
-        dry_run=True: заполняет и сохраняет форму, но не подписывает.
+        dry_run=True: заполняет форму до кнопки «Сохранить» и останавливается (на площадке ничего не сохраняется).
         Возвращает True, если заявление подписано и отправлено.
         """
         p = self.page
@@ -200,6 +200,12 @@ class Cabinet:
             self.snapshot(f"error_{inn}")
             raise
 
+    def _next(self):
+        """Кнопка «Далее» текущего шага (скрытые кнопки предыдущих шагов пропускаем)."""
+        btn = self.page.get_by_role("button", name="Далее").locator("visible=true")
+        btn.first.click()
+        self.page.wait_for_timeout(600)
+
     def _fill_and_send(self, inn, points, au, dry_run, check_au_balance) -> bool:
         p = self.page
         self._search(inn)          # ссылка «Подать заявление об участии» есть в карточке дела в результатах поиска
@@ -207,28 +213,60 @@ class Cabinet:
         p.get_by_text("Подать заявление об участии").first.click()
         p.wait_for_load_state("networkidle")
         self.snapshot(f"{inn}_1_step1")
-        # шаг 1: дело — просто «Далее»
-        p.get_by_role("button", name="Далее").first.click()
+        # шаг 1: дело, поля уже заполнены самим сайтом: просто «Далее»
+        self._next()
         # шаг 2: баллы (запятая как десятичный разделитель, как в форме)
-        p.get_by_label(re.compile("Количество баллов")).fill(str(points).replace(".", ","))
-        p.get_by_role("button", name="Далее").first.click()
-        self.snapshot(f"{inn}_2_step3")
-        # шаг 3: АУ по ФИО или ИНН
+        box = p.locator('input[id^="au-number"]')
+        box.wait_for()
+        box.fill(str(points).replace(".", ","))
+        self.snapshot(f"{inn}_2_points")
+        self._next()
+        self.snapshot(f"{inn}_3_au_step")
+        # шаг 3: АУ. Блок на каждого АУ: поле «Укажите ФИО или ИНН АУ» -> «Далее» -> строка результата
+        # «ФИО, ИНН, Доступные баллы N, [Выбрать]»
         for i, one in enumerate(au):
-            if i > 0:
-                p.get_by_text("добавить арбитражного управляющего").click()
-            box = p.get_by_label(re.compile("ФИО или ИНН АУ")).nth(i)
-            box.fill(one.get("fio") or one["inn"])
-            p.get_by_role("button", name="Далее").nth(i).click()
-            p.get_by_role("button", name="Выбрать").first.click()
-            if one.get("email"):
-                p.get_by_label("Электронная почта").nth(i).fill(one["email"])
-            if check_au_balance:
-                avail = d(p.get_by_label("Доступные баллы").nth(i).input_value())
+            # выбранный АУ превращается в заполненную анкету, поле поиска остаётся только у ещё не выбранных
+            fields = p.locator('input[id^="au-typeahead"]:visible')
+            if fields.count() == 0:
+                p.get_by_text("добавить арбитражного управляющего").first.click()
+                p.wait_for_timeout(500)
+                fields = p.locator('input[id^="au-typeahead"]:visible')
+            field = fields.first
+            field.scroll_into_view_if_needed()
+            field.click()
+            field.fill("")
+            field.press_sequentially(one.get("fio") or one["inn"], delay=40)
+            p.wait_for_timeout(700)
+            self.snapshot(f"{inn}_3_au{i + 1}_typed")
+            field.press("Enter")                 # то же, что кнопка «Далее» рядом с полем (submit формы)
+            pick = field.locator("xpath=following::button[normalize-space()='Выбрать'][1]")
+            try:
+                pick.wait_for(state="visible", timeout=8000)
+            except Exception:
+                nxt = field.locator("xpath=following::button[normalize-space()='Далее'][1]")
+                if nxt.count():
+                    nxt.first.click()
+                pick.wait_for(state="visible", timeout=8000)
+            self.snapshot(f"{inn}_3_au{i + 1}_found")
+            row = pick.locator("xpath=ancestor::*[contains(.,'Доступные баллы')][1]").inner_text()
+            m = re.search(r"Доступные баллы\s*([\d\s\xa0]+(?:[.,]\d+)?)", row)
+            if m and check_au_balance:
+                avail = d(re.sub(r"[\s\xa0]", "", m.group(1)))
                 self.last_avail.append(str(avail))
                 if points > avail:
-                    raise ValueError(f"ставка {points} больше доступных баллов АУ {avail}")
+                    raise ValueError(f"ставка {points} больше доступных баллов АУ {avail} ({one.get('fio') or one['inn']})")
+            elif check_au_balance:
+                print("(!) не удалось прочитать «Доступные баллы» АУ, проверка пропущена")
+            pick.click()
+            p.wait_for_timeout(800)
+            self.snapshot(f"{inn}_3_au{i + 1}_chosen")
+            if one.get("email"):
+                mail = p.locator("xpath=//label[contains(normalize-space(.),'Электронная почта')]/following::input[1]")
+                if mail.count() > i:
+                    mail.nth(i).fill(one["email"])
         self.snapshot(f"{inn}_3_before_save")
+        if dry_run:                    # тренировка: заявление на площадке не сохраняем и не отправляем
+            return False
         p.get_by_role("button", name="Сохранить").click()
         p.wait_for_load_state("networkidle")
         self.snapshot(f"{inn}_4_saved")
