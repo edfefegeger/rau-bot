@@ -272,9 +272,16 @@ class Cabinet:
         p.get_by_role("button", name="Сохранить").click()
         p.wait_for_load_state("networkidle")
         self.snapshot(f"{inn}_4_saved")
+        # страница «Просмотр заявления»: перед подписью сверяем баллы и число АУ с тем, что хотели подать
+        page = p.inner_text("body")
+        m = re.search(r"Количество баллов\s*\n?\s*([\d.,]+)", page)
+        if not m or d(m.group(1)) != points:
+            raise ValueError(f"в сохранённом заявлении баллы {m.group(1) if m else '?'}, ожидалось {points}: не подписываем")
+        if page.count("Доступные баллы") < len(au):
+            raise ValueError("в сохранённом заявлении меньше АУ, чем нужно: не подписываем")
         if dry_run:
             return False
-        p.get_by_role("button", name="Подписать и отправить").click()
+        p.get_by_role("button", name="Подписать и отправить").first.click()
         # окно «Выберите сертификат»: один сертификат, выбираем кликом по владельцу
         p.get_by_text("Выберите сертификат").wait_for(timeout=15000)
         p.locator("text=Выберите сертификат").locator("xpath=..").get_by_text(
