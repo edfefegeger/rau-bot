@@ -226,11 +226,11 @@ class Cabinet:
         # «ФИО, ИНН, Доступные баллы N, [Выбрать]»
         for i, one in enumerate(au):
             # выбранный АУ превращается в заполненную анкету, поле поиска остаётся только у ещё не выбранных
-            fields = p.locator('input[id^="au-typeahead"]:visible')
+            fields = p.locator('input[id^="au-typeahead"]:visible:not([readonly]):not([disabled])')
             if fields.count() == 0:
                 p.get_by_text("добавить арбитражного управляющего").first.click()
                 p.wait_for_timeout(500)
-                fields = p.locator('input[id^="au-typeahead"]:visible')
+                fields = p.locator('input[id^="au-typeahead"]:visible:not([readonly]):not([disabled])')
             field = fields.first
             field.scroll_into_view_if_needed()
             field.click()
@@ -260,10 +260,12 @@ class Cabinet:
             pick.click()
             p.wait_for_timeout(800)
             self.snapshot(f"{inn}_3_au{i + 1}_chosen")
-            if one.get("email"):
-                mail = p.locator("xpath=//label[contains(normalize-space(.),'Электронная почта')]/following::input[1]")
-                if mail.count() > i:
-                    mail.nth(i).fill(one["email"])
+            mail = p.locator("xpath=//label[contains(normalize-space(.),'Электронная почта')]/following::input[1]")
+            email = one.get("email", "")
+            if email and "укажите" not in email.lower() and mail.count() > i:   # заглушку из примера конфига не вписываем
+                mail.nth(i).fill(email)
+            if mail.count() > i and not mail.nth(i).input_value().strip():
+                print(f"(!) у АУ {one.get('fio') or one['inn']} не заполнена электронная почта: укажите её в config.json (email)")
         self.snapshot(f"{inn}_3_before_save")
         if dry_run:                    # тренировка: заявление на площадке не сохраняем и не отправляем
             return False
