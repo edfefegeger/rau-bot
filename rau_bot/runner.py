@@ -108,14 +108,32 @@ def _with_emails(au: list, reg: dict, cfg: "Config") -> list:
 
 
 class Journal:
+    FIELDS = ["time", "inn", "case", "debtor", "event", "points", "detail"]
+
     def __init__(self, path: str):
         self.path = path
+        self.meta: dict[str, tuple[str, str]] = {}   # ИНН -> (номер дела, должник)
+
+    def _rotate_old(self):
+        """Журнал старого формата (без номера дела) откладываем в отдельный файл."""
+        import os
+        try:
+            with open(self.path, encoding="utf-8-sig") as f:
+                head = f.readline().strip()
+        except OSError:
+            return
+        if head and head.split(",") != self.FIELDS:
+            os.replace(self.path, self.path.rsplit(".", 1)[0] + "_старый_формат.csv")
 
     def write(self, **kw):
         row = {"time": datetime.now().isoformat(timespec="seconds"), **kw}
+        case, debtor = self.meta.get(str(kw.get("inn", "")), ("", ""))
+        row.setdefault("case", case)
+        row.setdefault("debtor", debtor)
+        self._rotate_old()
         new = not _exists(self.path)
         with open(self.path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=["time", "inn", "event", "points", "detail"])
+            w = csv.DictWriter(f, fieldnames=self.FIELDS)
             if new:
                 w.writeheader()
             w.writerow({k: row.get(k, "") for k in w.fieldnames})
@@ -142,6 +160,8 @@ class Watcher:
         """'done' приём закончен, 'slow' ждём, 'fast' идёт финальное окно."""
         cfg, inn = self.cfg, t.inn
         info = self.cab.open_case(inn)
+        if getattr(info, "case_no", "") or getattr(info, "debtor", ""):
+            self.j.meta[inn] = (info.case_no, info.debtor)
         if info.period_end is None:
             self.j.write(inn=inn, event="error", detail="не найден срок окончания")
             return "slow"

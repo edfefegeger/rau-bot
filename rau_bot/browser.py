@@ -28,6 +28,16 @@ class CaseInfo:
     period_end: datetime | None
     bids: list[Application]          # заявления СРО в текущей процедуре
     text: str = ""
+    case_no: str = ""                # номер дела (А76-9594/2023)
+    debtor: str = ""                 # ФИО или наименование должника
+
+
+def parse_case_meta(text: str) -> tuple[str, str]:
+    """Номер дела и должник с карточки дела."""
+    m = re.search(r"Номер дела\s*\n\s*([^\n]+)", text)
+    no = m.group(1).strip() if m else ""
+    m = re.search(r"Должник\s*\n\s*(?:ФИО|Полное наименование)\s*\n\s*([^\n]+)", text)
+    return no, (m.group(1).strip() if m else "")
 
 
 # --- разбор текста страницы (проверяется тестами без сайта) -----------------
@@ -177,7 +187,8 @@ class Cabinet:
         end, bids = parse_case_text(text, self.tz)
         if end is None:
             self.snapshot(f"no_period_{inn}")
-        return CaseInfo(inn, p.url, end, bids, text)
+        no, debtor = parse_case_meta(text)
+        return CaseInfo(inn, p.url, end, bids, text, no, debtor)
 
     def dump(self, inn: str, out_prefix: str):
         """Сохраняет страницу дела для отладки разбора."""

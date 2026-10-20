@@ -227,4 +227,18 @@ def test_journal_xlsx(tmp_path):
     p = tmp_path / "j.csv"
     p.write_text("time,inn,event,points,detail\n2026-10-20T11:46:56,071402202701,initial_sent,0.01,ok\n", encoding="utf-8-sig")
     ws = openpyxl.load_workbook(io.BytesIO(journal_to_xlsx(str(p)))).active
-    assert ws["B2"].value == "071402202701" and ws["C2"].value.startswith("Первая") and ws["E2"].value == 0.01
+    assert ws["B2"].value == "071402202701" and ws["E2"].value.startswith("Первая") and ws["G2"].value == 0.01
+
+
+def test_case_meta_and_journal_columns(tmp_path):
+    from pathlib import Path
+    from rau_bot.browser import parse_case_meta
+    no, debtor = parse_case_meta(Path(__file__).parent.joinpath("data/case_uchastniki.txt").read_text(encoding="utf8"))
+    assert no == "А76-9594/2023" and "ТЕХНОЛОГИИ СНАБЖЕНИЯ" in debtor
+    no, debtor = parse_case_meta("Должник\nФИО\nКРАСИКОВА АЛЁНА\nИНН\n1")
+    assert debtor == "КРАСИКОВА АЛЁНА"
+    from rau_bot.runner import Journal
+    j = Journal(str(tmp_path / "j.csv"))
+    j.meta["1"] = ("А1/2026", "ИВАНОВ")
+    j.write(inn="1", event="bid")
+    assert "А1/2026" in (tmp_path / "j.csv").read_text(encoding="utf-8-sig")

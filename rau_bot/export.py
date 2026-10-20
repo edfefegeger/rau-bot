@@ -24,7 +24,7 @@ def journal_to_xlsx(csv_path: str) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "Журнал"
-    ws.append(["Время", "ИНН должника", "Событие", "Код события", "Баллы", "Подробности"])
+    ws.append(["Время", "ИНН должника", "Номер дела", "Должник", "Событие", "Код события", "Баллы", "Подробности"])
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         for r in csv.DictReader(f):
             ev = r.get("event", "")
@@ -34,10 +34,10 @@ def journal_to_xlsx(csv_path: str) -> bytes:
             except ValueError:
                 pass
             ws.append([r.get("time", "").replace("T", " "), str(r.get("inn", "")),
-                       EVENTS.get(ev, ev), ev, pts, r.get("detail", "")])
+                       r.get("case", ""), r.get("debtor", ""), EVENTS.get(ev, ev), ev, pts, r.get("detail", "")])
     for c in ws[1]:
         c.font = Font(bold=True)
-    for i, w in enumerate([19, 16, 38, 16, 9, 90], 1):
+    for i, w in enumerate([19, 16, 18, 34, 38, 16, 9, 90], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     for row in ws.iter_rows(min_row=2, min_col=2, max_col=2):
         row[0].number_format = "@"                 # ИНН как текст, ведущие нули не теряются
