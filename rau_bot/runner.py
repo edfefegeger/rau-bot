@@ -175,6 +175,14 @@ class Watcher:
         ours = bids.get(cfg.our_inn)
         self.our_bid[inn] = ours
         rivals = [v for k, v in bids.items() if k != cfg.our_inn]
+        key = ("watch", ours, tuple(sorted(rivals)))
+        if self._last.get(inn + ":w") != key:        # пишем наблюдение, только когда что-то изменилось
+            self._last[inn + ":w"] = key
+            mins = int(left // 60)
+            self.j.write(inn=inn, event="watch", points=ours if ours is not None else "",
+                         detail=f"до конца {mins // 60} ч {mins % 60} мин; наша ставка: "
+                                f"{ours if ours is not None else 'нет'}; ставки конкурентов: "
+                                f"{', '.join(str(x) for x in sorted(rivals)) or 'нет'}")
 
         if ours is None:
             if cfg.place_initial and left > cfg.final_window_min * 60:
