@@ -168,6 +168,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"text": open(TARGETS, encoding="utf-8-sig").read()})
         if u.path == "/api/journal":
             return self._json({"text": journal_tail()})
+        if u.path == "/journal.xlsx":
+            from rau_bot.export import journal_to_xlsx
+            try:
+                cfg = json.load(open(CONFIG, encoding="utf8"))
+                data = journal_to_xlsx(os.path.join(HERE, cfg.get("journal", "journal.csv")))
+            except OSError:
+                return self._send(404, "журнала ещё нет", "text/plain; charset=utf-8")
+            return self._send(200, data, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         self._send(404, "not found", "text/plain")
 
     def do_POST(self):
@@ -230,7 +238,8 @@ pre{height:260px;overflow:auto;margin:0;white-space:pre-wrap}textarea{height:150
 
 <div class="card"><h2>Что происходит</h2><pre id="log"></pre>
 <div class="row" style="margin-top:10px"><button onclick="act('check')">Проверить расчёт на протоколах</button>
-<button onclick="journal()">Показать журнал ставок</button></div></div>
+<button onclick="journal()">Показать журнал ставок</button>
+<button onclick="location.href='/journal.xlsx?k='+K">Скачать журнал в Excel</button></div></div>
 </main><script>
 const K="__TOKEN__";let since=0;
 const $=id=>document.getElementById(id);

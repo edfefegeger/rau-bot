@@ -219,3 +219,12 @@ def test_repeated_decision_logged_once(tmp_path):
     from rau_bot.runner import Watcher, Journal, Config, Target
     import inspect
     assert "_last" in inspect.getsource(Watcher.__init__)
+
+
+def test_journal_xlsx(tmp_path):
+    import io, openpyxl
+    from rau_bot.export import journal_to_xlsx
+    p = tmp_path / "j.csv"
+    p.write_text("time,inn,event,points,detail\n2026-10-20T11:46:56,071402202701,initial_sent,0.01,ok\n", encoding="utf-8-sig")
+    ws = openpyxl.load_workbook(io.BytesIO(journal_to_xlsx(str(p)))).active
+    assert ws["B2"].value == "071402202701" and ws["C2"].value.startswith("Первая") and ws["E2"].value == 0.01
