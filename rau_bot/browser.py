@@ -75,6 +75,10 @@ _CONTROLS_JS = """() => {
 }"""
 
 
+class CaseClosed(Exception):
+    """По делу нельзя подать заявление (приём закончен или процедура уже в другом статусе)."""
+
+
 class Cabinet:
     def __init__(self, cdp_url: str = "http://127.0.0.1:9222", tz: str = "Europe/Moscow",
                  debug_dir: str = "debug", attach: bool = False):
@@ -210,7 +214,15 @@ class Cabinet:
         p = self.page
         self._search(inn)          # ссылка «Подать заявление об участии» есть в карточке дела в результатах поиска
         self.snapshot(f"{inn}_0_search")
-        p.get_by_text("Подать заявление об участии").first.click()
+        apply = p.get_by_text("Подать заявление об участии")
+        try:
+            apply.first.wait_for(state="visible", timeout=10000)
+        except Exception:
+            card = p.inner_text("body")
+            m = re.search(r"Статус процедуры выбора(.{0,120})", card, re.S)
+            st = re.sub(r"\s+", " ", m.group(1)).strip() if m else "?"
+            raise CaseClosed(f"нет кнопки «Подать заявление об участии»; {st}")
+        apply.first.click()
         p.wait_for_load_state("networkidle")
         self.snapshot(f"{inn}_1_step1")
         # шаг 1: дело, поля уже заполнены самим сайтом: просто «Далее»
@@ -249,20 +261,21 @@ class Cabinet:
                 pick.wait_for(state="visible", timeout=8000)
             self.snapshot(f"{inn}_3_au{i + 1}_found")
             row = pick.locator("xpath=ancestor::*[contains(.,'Доступные баллы')][1]").inner_text()
-            m = re.search(r"Доступные баллы\s*([\d\s\xa0]+(?:[.,]\d+)?)", row)
+            m = re.search(r"Доступные баллы\s*([\d\s\xa0]*\d(?:[.,]\d+)?)", row)
             if m and check_au_balance:
                 avail = d(re.sub(r"[\s\xa0]", "", m.group(1)))
                 self.last_avail.append(str(avail))
                 if points > avail:
                     raise ValueError(f"ставка {points} больше доступных баллов АУ {avail} ({one.get('fio') or one['inn']})")
             elif check_au_balance:
-                print("(!) не удалось прочитать «Доступные баллы» АУ, проверка пропущена")
+                print(f"(!) у АУ {one.get('fio') or one['inn']} не видно доступных баллов ({row[:80]!r}): проверка пропущена")
             pick.click()
             p.wait_for_timeout(800)
             self.snapshot(f"{inn}_3_au{i + 1}_chosen")
             mail = p.locator("xpath=//label[contains(normalize-space(.),'Электронная почта')]/following::input[1]")
             email = one.get("email", "")
-            if email and "укажите" not in email.lower() and mail.count() > i:   # заглушку из примера конфига не вписываем
+            if (email and "укажите" not in email.lower() and mail.count() > i
+                    and not mail.nth(i).input_value().strip()):      # почту, подставленную сайтом, не трогаем
                 mail.nth(i).fill(email)
             if mail.count() > i and not mail.nth(i).input_value().strip():
                 print(f"(!) у АУ {one.get('fio') or one['inn']} не заполнена электронная почта: укажите её в config.json (email)")

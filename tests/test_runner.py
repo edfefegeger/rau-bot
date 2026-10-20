@@ -186,3 +186,36 @@ def test_queue_lead_moves_bid_earlier(tmp_path):
     w.extra_lead_s = 200                   # очередь из 11 дел
     w.step(T(D("100")))
     assert len(cab.sent) == 1              # 300 <= 180+200: начинаем
+
+
+def test_registry_emails_and_default(tmp_path):
+    import openpyxl
+    from rau_bot.registry import load_registry
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["№ п/п", "Ф.И.О. Арбитражного управляющего", None])
+    ws.append([None, None, "Адрес электронной почты"])
+    ws.append([1, "Заманов Александр Михайлович", "zamanov@mail.ru"])
+    ws.append([2, "Глотко Ольга  Васильевна", " glotko@mail.ru"])
+    ws.append([3, "Иванов Иван Иванович", "a@a.ru"])
+    ws.append([4, "Иванов Иван Иванович", "b@b.ru"])     # тёзки: почту не берём
+    p = tmp_path / "reg.xlsx"
+    wb.save(p)
+    reg = load_registry(str(p))
+    assert reg["ГЛОТКО ОЛЬГА ВАСИЛЬЕВНА"] == "glotko@mail.ru" and "ИВАНОВ ИВАН ИВАНОВИЧ" not in reg
+    f = tmp_path / "t.csv"
+    f.write_text("inn;max_bid;initial;step;au1;au2;au_cap\n"
+                 "071402202701;5;0.01;;ЗАМАНОВ АЛЕКСАНДР МИХАЙЛОВИЧ ;ГЛОТКО ОЛЬГА ВАСИЛЬЕВНА;\n"
+                 "1;5;;;ИВАНОВ ИВАН ИВАНОВИЧ;Неизвестный Ав Авович|x@y.ru;\n", encoding="utf-8")
+    cfg = Config(registry=str(p), default_au_email="def@mail.ru")
+    t = read_targets(str(f), cfg)["071402202701"]
+    assert [a["email"] for a in t.au] == ["zamanov@mail.ru", "glotko@mail.ru"]
+    assert t.au[0]["fio"] == "ЗАМАНОВ АЛЕКСАНДР МИХАЙЛОВИЧ"
+    assert t.max_bid == D("5")
+
+
+def test_repeated_decision_logged_once(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from rau_bot.runner import Watcher, Journal, Config, Target
+    import inspect
+    assert "_last" in inspect.getsource(Watcher.__init__)

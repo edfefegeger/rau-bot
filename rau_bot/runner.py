@@ -26,6 +26,8 @@ class Config:
     extra_margin: Decimal = Decimal("0")    # запас баллов сверху к расчётному минимуму
     default_max_bid: Decimal = Decimal("805")   # баллы СРО целиком
     check_au_balance: bool = True                # не подавать, если ставка больше доступных баллов АУ
+    registry: str = "au_registry.xlsx"           # реестр АУ с почтами (необязательно)
+    default_au_email: str = ""                   # почта, если у АУ нет своей в форме и в реестре
     au: list = field(default_factory=list)  # [{"fio": "...", "email": "..."}, ...]
     journal: str = "journal.csv"
     cdp_url: str = "http://127.0.0.1:9222"
@@ -63,6 +65,8 @@ def read_targets(path: str, cfg: "Config") -> dict[str, Target]:
              if l.strip() and not l.lstrip().startswith("#")]
     delim = ";" if ";" in lines[0] else ","
     out: dict[str, Target] = {}
+    from .registry import load_registry
+    reg = load_registry(cfg.registry)
     for r in _csv.DictReader(lines, delimiter=delim):
         r = {k.strip().lower(): (v or "").strip() for k, v in r.items() if k}
         inn = r.get("inn", "")
@@ -76,14 +80,31 @@ def read_targets(path: str, cfg: "Config") -> dict[str, Target]:
         for key in ("au1", "au2", "au3", "au4"):
             if r.get(key):
                 fio, _, mail = r[key].partition("|")
+                fio = fio.strip()
                 item = {"inn": fio} if fio.isdigit() else {"fio": fio}
-                if mail:
-                    item["email"] = mail
+                if mail.strip():
+                    item["email"] = mail.strip()
                 au.append(item)
-        out[inn] = Target(inn, min(caps), au or cfg.au,
+        out[inn] = Target(inn, min(caps), _with_emails(au or cfg.au, reg, cfg),
                           d(r["initial"]) if r.get("initial") else cfg.initial_points,
                           d(r["step"]) if r.get("step") else None)
     return out
+
+
+def _with_emails(au: list, reg: dict, cfg: "Config") -> list:
+    """Почта АУ для формы: заданная явно, иначе из реестра, иначе общая по умолчанию.
+    (Бот вписывает её, только если сайт сам не подставил почту.)"""
+    from .registry import norm_fio
+    res = []
+    for a in au:
+        a = dict(a)
+        if not a.get("email") or "укажите" in a["email"].lower():
+            a.pop("email", None)
+            mail = reg.get(norm_fio(a.get("fio", ""))) or cfg.default_au_email
+            if mail:
+                a["email"] = mail
+        res.append(a)
+    return res
 
 
 class Journal:
@@ -114,6 +135,7 @@ class Watcher:
         self.now = now or (lambda: datetime.now(get_tz(cfg.tz)))
         self.our_bid: dict[str, Decimal | None] = {}
         self.end: dict[str, datetime] = {}      # срок окончания приёма по делу (для расписания)
+        self._last: dict[str, tuple] = {}       # последняя запись решения по делу (чтобы не повторять)
         self.extra_lead_s = 0                   # добавка к bid_not_before_s на очередь из многих дел
 
     def step(self, t: "Target") -> str:
@@ -144,7 +166,10 @@ class Watcher:
         dec = decide(ours, rivals, t.max_bid - cfg.extra_margin, t.initial, t.step)
         if cfg.bid_not_before_s and left > cfg.bid_not_before_s + self.extra_lead_s:
             return "fast"                    # смотрим, но ещё не ставим
-        self.j.write(inn=inn, event=dec.action, points=dec.points or "", detail=dec.reason)
+        key = (dec.action, dec.points, dec.reason)
+        if dec.action == "bid" or self._last.get(inn) != key:   # одинаковое «не ставим» пишем один раз
+            self.j.write(inn=inn, event=dec.action, points=dec.points or "", detail=dec.reason)
+        self._last[inn] = key
         if dec.action == "bid":
             self._send(t, dec.points + cfg.extra_margin, "bid")
         return "fast"
@@ -197,6 +222,11 @@ def run(cfg: Config, targets: dict[str, "Target"]):
                 try:
                     state = w.step(t)
                 except Exception as e:      # ошибка по одному делу не должна ронять остальные
+                    from .browser import CaseClosed
+                    if isinstance(e, CaseClosed):
+                        w.j.write(inn=inn, event="skipped", detail=str(e))
+                        del active[inn]      # подать нельзя: дело больше не опрашиваем
+                        continue
                     w.j.write(inn=inn, event="error", detail=repr(e))
                     due[inn] = time.monotonic() + cfg.poll_fast_s
                     continue
