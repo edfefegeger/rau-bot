@@ -295,6 +295,8 @@ class Cabinet:
             return False
         p.get_by_role("button", name="Сохранить").click()
         p.wait_for_load_state("networkidle")
+        p.get_by_text("Просмотр заявления").first.wait_for(timeout=20000)   # ждём, пока откроется страница просмотра
+        p.get_by_text("Количество баллов").nth(1).wait_for(timeout=10000)
         self.snapshot(f"{inn}_4_saved")
         # страница «Просмотр заявления»: перед подписью сверяем баллы и число АУ с тем, что хотели подать
         page = p.inner_text("body")
