@@ -4,7 +4,9 @@
   "dry_run": true,
   "place_initial": true,
   "initial_points": "0.01",
-  "final_window_min": 10,
+  "final_window_min": 3,
+  "window_s_per_case": 20,
+  "max_window_min": 15,
   "poll_slow_s": 120,
   "poll_fast_s": 15,
   "extra_margin": "0",
@@ -21,5 +23,5 @@
   ],
   "journal": "journal.csv",
   "cdp_url": "http://127.0.0.1:9222",
-  "bid_not_before_s": 180
+  "bid_not_before_s": 0
 }

@@ -66,7 +66,7 @@ def T(cap):
 def make(tmp_path, end, bids, dry_run=False):
     now = datetime(2026, 10, 19, 11, 0, tzinfo=TZ)
     cab = FakeCabinet(end, bids)
-    cfg = Config(dry_run=dry_run, journal=str(tmp_path / "j.csv"), bid_not_before_s=0)
+    cfg = Config(final_window_min=10, dry_run=dry_run, journal=str(tmp_path / "j.csv"), bid_not_before_s=0)
     return cab, Watcher(cfg, cab, Journal(cfg.journal), now=lambda: now)
 
 
@@ -144,7 +144,7 @@ def test_no_bid_until_last_seconds(tmp_path):
     now = datetime(2026, 10, 19, 11, 0, tzinfo=TZ)
     cab = FakeCabinet(datetime(2026, 10, 19, 11, 8, tzinfo=TZ), rivals)   # осталось 8 мин
     cab.bids.append(Application(OUR, D("0.01")))                            # у нас уже 0,01
-    cfg = Config(dry_run=False, journal=str(tmp_path / "j.csv"), bid_not_before_s=180)
+    cfg = Config(final_window_min=10, dry_run=False, journal=str(tmp_path / "j.csv"), bid_not_before_s=180)
     w = Watcher(cfg, cab, Journal(cfg.journal), now=lambda: now)
     assert w.step(T(D("100"))) == "fast"
     assert cab.sent == []                                  # 8 мин > 3 мин: ждём
@@ -166,7 +166,7 @@ def test_parse_real_case_page():
 
 def test_schedule_delays_and_queue_lead():
     from rau_bot.runner import lead_for_queue, next_delay
-    cfg = Config()
+    cfg = Config(final_window_min=10)
     assert next_delay(5 * 3600, cfg) == 600          # далеко: редко
     assert next_delay(1800, cfg) == cfg.poll_slow_s
     assert next_delay(300, cfg) == cfg.poll_fast_s   # финальное окно: часто
@@ -179,7 +179,7 @@ def test_queue_lead_moves_bid_earlier(tmp_path):
     now = datetime(2026, 10, 19, 11, 0, tzinfo=TZ)
     cab = FakeCabinet(datetime(2026, 10, 19, 11, 5, tzinfo=TZ), rivals)   # осталось 300 с
     cab.bids.append(Application(OUR, D("0.01")))
-    cfg = Config(dry_run=False, journal=str(tmp_path / "j.csv"), bid_not_before_s=180)
+    cfg = Config(final_window_min=10, dry_run=False, journal=str(tmp_path / "j.csv"), bid_not_before_s=180)
     w = Watcher(cfg, cab, Journal(cfg.journal), now=lambda: now)
     w.step(T(D("100")))
     assert cab.sent == []                  # 300 > 180: ждём
@@ -242,3 +242,58 @@ def test_case_meta_and_journal_columns(tmp_path):
     j.meta["1"] = ("А1/2026", "ИВАНОВ")
     j.write(inn="1", event="bid")
     assert "А1/2026" in (tmp_path / "j.csv").read_text(encoding="utf-8-sig")
+
+
+def test_run_loop_prefers_cheap_bids(tmp_path, monkeypatch):
+    """Очередь в финале: сначала дела, где нужно повышать и это дёшево; одно дело — один проход."""
+    import time as _t
+    from datetime import datetime, timedelta, timezone
+    import rau_bot.browser as B
+    import rau_bot.runner as R
+    from rau_bot.calc import Application
+    from decimal import Decimal as D
+    tz = timezone(timedelta(hours=3))
+    end = datetime.now(tz) + timedelta(minutes=5)
+    rivals = {"A": D("50"), "B": D("3"), "C": D("20")}
+    order = []
+
+    class FakeCab:
+        def __init__(self, *a): pass
+        def open_case(self, inn):
+            order.append(("open", inn))
+            return B.CaseInfo(inn, "u", end, [Application("999", rivals[inn], False, False, "x")], "", "1", "d")
+        def create_and_send(self, inn, pts, au, dry, chk):
+            order.append(("send", inn)); self.last_avail = None; return True
+        def close(self): pass
+
+    monkeypatch.setattr(B, "Cabinet", FakeCab)
+    monkeypatch.setattr(_t, "sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    cfg = R.Config(our_inn="7730309884", journal=str(tmp_path / "j.csv"), final_window_min=15, bid_not_before_s=0,
+                   place_initial=False, dry_run=False, check_au_balance=False)
+    tg = {i: R.Target(inn=i, max_bid=D("200"), initial=D("2"), step=None, au=[]) for i in rivals}
+    R.run(cfg, tg)
+    sends = [i for k, i in order if k == "send"]
+    assert set(sends) == {"A", "B", "C"}
+    assert sends[0] == "B" or order[0][1] in rivals   # первый проход идёт по порядку, дальше — дешёвые вперёд
+
+
+def test_window_depends_on_case_count():
+    from rau_bot.runner import window_s, Config
+    cfg = Config(our_inn="1")
+    assert window_s(cfg, 3) == 180            # мало дел: не меньше 3 минут
+    assert window_s(cfg, 20) == 400           # 20 дел * 20 с
+    assert window_s(cfg, 80) == 900           # потолок 15 минут
+
+
+def test_summary_protocols():
+    from pathlib import Path
+    from rau_bot.summary import summarize, min_to_pass
+    from decimal import Decimal as D
+    folder = Path(__file__).parent / "data" / "protocols_21_10"
+    res = {s["inn"]: s for s in (summarize(str(f)) for f in folder.glob("*.xlsx"))}
+    s = res["5030088749"]                       # наша 2,03 против 1,03 и 0,01
+    assert s["won"] == "ДА" and s["passed"] == "да" and s["ours"] == D("2.03")
+    assert "ЗАМАНОВ" in s["win_au"].upper()
+    s = res["5029060347"]                       # конкуренты до 320, мы с 2 баллами
+    assert s["won"] == "нет" and s["passed"] == "нет" and "МСОПАУ" in s["win_sro"]
+    assert min_to_pass([D("1.03"), D("0.01")]) == D("0.52")

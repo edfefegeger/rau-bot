@@ -18,7 +18,9 @@ class Config:
     dry_run: bool = True                    # True: считаем и заполняем, но не подписываем
     place_initial: bool = True              # сразу подать 0,01, чтобы быть участником
     initial_points: Decimal = CENT
-    final_window_min: int = 10              # за сколько минут до конца включаем быстрый режим
+    final_window_min: int = 3               # минимум минут до конца, с которых начинаем повышать ставки
+    window_s_per_case: int = 20             # добавка к окну на каждое дело списка (секунд): дел много -> начинаем раньше
+    max_window_min: int = 15                # потолок окна повышений (минут)
     bid_not_before_s: int = 180             # расчётную ставку подаём не раньше, чем за столько секунд до конца (0 = сразу)
                                             # (экономия баллов: конкуренты ставят в конце, мы после них)
     poll_slow_s: int = 120
@@ -154,6 +156,9 @@ class Watcher:
         self.our_bid: dict[str, Decimal | None] = {}
         self.end: dict[str, datetime] = {}      # срок окончания приёма по делу (для расписания)
         self._last: dict[str, tuple] = {}       # последняя запись решения по делу (чтобы не повторять)
+        self.prio: dict[str, tuple] = {}        # приоритет в очереди: (0 нужно повышать, 1 не смотрели, 2 ждём/не можем), цена
+        self.delay: dict[str, float] = {}       # как скоро снова смотреть дело (переопределяет next_delay)
+        self.win_s = cfg.final_window_min * 60  # окно повышений; run() пересчитывает по числу дел
         self.extra_lead_s = 0                   # добавка к bid_not_before_s на очередь из многих дел
 
     def step(self, t: "Target") -> str:
@@ -185,15 +190,22 @@ class Watcher:
                                 f"{', '.join(str(x) for x in sorted(rivals)) or 'нет'}")
 
         if ours is None:
-            if cfg.place_initial and left > cfg.final_window_min * 60:
+            if cfg.place_initial and left > self.win_s:
                 self._send(t, t.initial, "initial")
                 return "slow"
-        if left > cfg.final_window_min * 60:
+        if left > self.win_s:
             return "slow"                    # ждём финального окна
 
         dec = decide(ours, rivals, t.max_bid - cfg.extra_margin, t.initial, t.step)
         if cfg.bid_not_before_s and left > cfg.bid_not_before_s + self.extra_lead_s:
             return "fast"                    # смотрим, но ещё не ставим
+        # очередь в финале: сначала дела, где нужно повышать и это дёшево; где всё в порядке или предел мал, смотрим реже
+        if dec.action == "bid":
+            self.prio[inn] = (0, dec.points)
+            self.delay.pop(inn, None)
+        else:
+            self.prio[inn] = (2, 0)
+            self.delay[inn] = 90 if dec.action == "over_cap" else 30
         key = (dec.action, dec.points, dec.reason)
         if dec.action == "bid" or self._last.get(inn) != key:   # одинаковое «не ставим» пишем один раз
             self.j.write(inn=inn, event=dec.action, points=dec.points or "", detail=dec.reason)
@@ -213,11 +225,17 @@ class Watcher:
         self.our_bid[inn] = points if ok else self.our_bid.get(inn)
 
 
-def next_delay(left_s: float, cfg: Config) -> float:
+def window_s(cfg: Config, n_cases: int) -> float:
+    """За сколько секунд до конца начинаем повышать ставки: чем больше дел, тем раньше (но в пределах min..max)."""
+    lo, hi = cfg.final_window_min * 60, max(cfg.final_window_min, cfg.max_window_min) * 60
+    return min(hi, max(lo, n_cases * cfg.window_s_per_case))
+
+
+def next_delay(left_s: float, cfg: Config, win_s: float | None = None) -> float:
     """Через сколько секунд снова смотреть дело, если до конца приёма left_s секунд."""
     if left_s > 3600:
         return max(cfg.poll_slow_s, 600)          # до конца далеко: раз в 10 минут
-    if left_s > cfg.final_window_min * 60:
+    if left_s > (win_s if win_s is not None else cfg.final_window_min * 60):
         return cfg.poll_slow_s
     return cfg.poll_fast_s
 
@@ -238,15 +256,21 @@ def run(cfg: Config, targets: dict[str, "Target"]):
     try:
         while active:
             now = time.monotonic()
-            ready = [inn for inn in active if due[inn] <= now]
-            # дела, у которых конец ближе, обрабатываем первыми
-            ready.sort(key=lambda i: w.end.get(i).timestamp() if w.end.get(i) else 0)
+            w.win_s = window_s(cfg, len(targets))     # от общего числа дел, а не от оставшихся
             in_window = [i for i in active if w.end.get(i) and
-                         (w.end[i] - w.now()).total_seconds() <= cfg.final_window_min * 60]
+                         (w.end[i] - w.now()).total_seconds() <= w.win_s]
             w.extra_lead_s = lead_for_queue(len(in_window))
-            for inn in ready:
+            done_now = set()
+            while True:
+                # каждый раз заново выбираем самое важное из готовых дел (а не идём по кругу до конца списка)
+                ready = [i for i in active if due[i] <= time.monotonic() and i not in done_now]
+                if not ready:
+                    break
+                ready.sort(key=lambda i: (w.prio.get(i, (1, 0)),
+                                          w.end.get(i).timestamp() if w.end.get(i) else 0))
+                inn = ready[0]
+                done_now.add(inn)
                 t = active[inn]
-                t0 = time.monotonic()
                 try:
                     state = w.step(t)
                 except Exception as e:      # ошибка по одному делу не должна ронять остальные
@@ -262,7 +286,7 @@ def run(cfg: Config, targets: dict[str, "Target"]):
                     del active[inn]
                     continue
                 left = (w.end[inn] - w.now()).total_seconds() if inn in w.end else 0
-                due[inn] = time.monotonic() + next_delay(left, cfg)
+                due[inn] = time.monotonic() + w.delay.get(inn, next_delay(left, cfg, w.win_s))
             if active:
                 time.sleep(max(1.0, min(due.values()) - time.monotonic()))
     except KeyboardInterrupt:
