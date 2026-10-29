@@ -258,7 +258,7 @@ def test_run_loop_prefers_cheap_bids(tmp_path, monkeypatch):
     order = []
 
     class FakeCab:
-        def __init__(self, *a): pass
+        def __init__(self, *a, **kw): pass
         def open_case(self, inn):
             order.append(("open", inn))
             return B.CaseInfo(inn, "u", end, [Application("999", rivals[inn], False, False, "x")], "", "1", "d")
@@ -297,3 +297,72 @@ def test_summary_protocols():
     s = res["5029060347"]                       # конкуренты до 320, мы с 2 баллами
     assert s["won"] == "нет" and s["passed"] == "нет" and "МСОПАУ" in s["win_sro"]
     assert min_to_pass([D("1.03"), D("0.01")]) == D("0.52")
+
+
+def test_split_targets_round_robin():
+    from rau_bot.runner import split_targets
+    t = {str(i): i for i in range(7)}
+    parts = split_targets(t, 3)
+    assert [list(p) for p in parts] == [["0", "3", "6"], ["1", "4"], ["2", "5"]]
+    assert len(split_targets({"a": 1}, 4)) == 1          # пустых вкладок не создаём
+
+
+def test_parallel_workers_cover_all_cases(tmp_path, monkeypatch):
+    """workers=3: каждая вкладка берёт свою часть, все дела обработаны один раз, журнал не портится."""
+    import threading
+    from datetime import datetime, timedelta, timezone
+    import rau_bot.browser as B
+    import rau_bot.runner as R
+    from rau_bot.calc import Application
+    from decimal import Decimal as D
+    tz = timezone(timedelta(hours=3))
+    end = datetime.now(tz) + timedelta(minutes=2)
+    tabs, sent, lock = set(), [], threading.Lock()
+
+    class FakeCab:
+        def __init__(self, *a, new_tab=False, **kw):
+            assert new_tab is True                   # параллельные вкладки всегда отдельные
+            self.last_avail = None
+        def open_case(self, inn):
+            with lock: tabs.add(threading.get_ident())
+            return B.CaseInfo(inn, "u", end, [Application("999", D("3"), False, False, "x")], "", "N" + inn, "D")
+        def create_and_send(self, inn, pts, au, dry, chk):
+            with lock: sent.append(inn)
+            return True
+        def close(self): pass
+
+    monkeypatch.setattr(B, "Cabinet", FakeCab)
+    monkeypatch.setattr(R.time, "sleep", lambda s: None)
+    cfg = R.Config(our_inn="7730309884", journal=str(tmp_path / "j.csv"), workers=3, bid_not_before_s=0,
+                   place_initial=False, dry_run=False, check_au_balance=False)
+    tg = {str(i): R.Target(inn=str(i), max_bid=D("200"), initial=D("2"), step=None, au=[]) for i in range(6)}
+    orig = R.Watcher.step
+    def one(self, t):
+        orig(self, t)
+        return "done"                                  # одного прохода по делу достаточно
+    monkeypatch.setattr(R.Watcher, "step", one)
+    R.run(cfg, tg)
+    assert sorted(sent) == sorted(tg)                    # каждое дело подано один раз
+    assert len(tabs) == 3                                # работало три вкладки
+
+
+def test_runner_allows_fifteen_workers(tmp_path, monkeypatch):
+    import threading
+    import rau_bot.runner as R
+
+    started = []
+    lock = threading.Lock()
+
+    def fake_worker(cfg, shard, journal, stop, new_tab=False, label=""):
+        with lock:
+            started.append((new_tab, label))
+
+    monkeypatch.setattr(R, "_worker", fake_worker)
+    monkeypatch.setattr(R.time, "sleep", lambda _: None)
+    cfg = R.Config(journal=str(tmp_path / "j.csv"), workers=15)
+    targets = {str(i): object() for i in range(15)}
+
+    R.run(cfg, targets)
+
+    assert len(started) == 15
+    assert all(new_tab for new_tab, _ in started)

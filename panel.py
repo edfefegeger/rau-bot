@@ -99,6 +99,23 @@ def make_run_config(live: bool) -> str:
     return RUN_CONFIG
 
 
+def get_worker_count() -> int:
+    cfg = json.load(open(CONFIG, encoding="utf8"))
+    workers = cfg.get("workers", 1)
+    if isinstance(workers, bool) or not isinstance(workers, int):
+        raise ValueError("workers в config.json должен быть целым числом")
+    return max(1, min(workers, 15))
+
+
+def set_worker_count(workers: object) -> None:
+    if type(workers) is not int or not 1 <= workers <= 15:
+        raise ValueError("Укажите целое число вкладок от 1 до 15")
+    cfg = json.load(open(CONFIG, encoding="utf8"))
+    cfg["workers"] = workers
+    with open(CONFIG, "w", encoding="utf8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
 def journal_tail(n=40):
     try:
         cfg = json.load(open(CONFIG, encoding="utf8"))
@@ -160,6 +177,11 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/status":
             return self._json({"browser": launcher.port_open(), "running": runner.running,
                                "mode": runner.mode if runner.running else ""})
+        if u.path == "/api/settings":
+            try:
+                return self._json({"workers": get_worker_count()})
+            except (OSError, ValueError) as e:
+                return self._json({"ok": False, "msg": f"Ошибка в config.json: {e}"}, 500)
         if u.path == "/api/log":
             n = int((parse_qs(u.query).get("since") or ["0"])[0])
             total, lines = runner.since(n)
@@ -195,6 +217,16 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/action":
             ok, msg = do_action(body.get("name", ""))
             return self._json({"ok": ok, "msg": msg})
+        if u.path == "/api/settings":
+            try:
+                set_worker_count(body.get("workers"))
+            except json.JSONDecodeError as e:
+                return self._json({"ok": False, "msg": f"Не удалось сохранить config.json: {e}"}, 500)
+            except ValueError as e:
+                return self._json({"ok": False, "msg": str(e)}, 400)
+            except OSError as e:
+                return self._json({"ok": False, "msg": f"Не удалось сохранить config.json: {e}"}, 500)
+            return self._json({"ok": True, "msg": "Количество вкладок сохранено"})
         if u.path == "/api/targets":
             open(TARGETS, "w", encoding="utf-8", newline="\n").write(body.get("text", ""))
             return self._json({"ok": True, "msg": "список сохранён"})
@@ -234,6 +266,11 @@ pre{height:260px;overflow:auto;margin:0;white-space:pre-wrap}textarea{height:150
 <button class="p" id="bd" onclick="act('run_dry')">▶ Тренировка (без подписи)</button>
 <button class="live" id="bl" onclick="live()">▶ БОЕВОЙ режим (подписывает)</button>
 <button onclick="act('stop')">■ Стоп</button></div>
+<div class="row" style="margin-top:12px">
+<label for="workers">Вкладок одновременно:</label>
+<input id="workers" type="number" min="1" max="15" step="1" value="1" style="width:90px">
+<button onclick="saveSettings()">Сохранить</button></div>
+<p class="hint">Число вкладок сохраняется в config.json и применяется при следующем запуске.</p>
 <p class="hint">Тренировка заполняет форму и считает ставку, но ничего не отправляет. Боевой режим подписывает и отправляет заявки.</p>
 <div id="msg"></div></div>
 
@@ -253,6 +290,7 @@ const $=id=>document.getElementById(id);
 async function api(p,o){const r=await fetch(p+(p.includes('?')?'&':'?')+'k='+K,o);return r.json()}
 async function act(n){const r=await api('/api/action',{method:'POST',body:JSON.stringify({name:n})});$('msg').textContent=r.msg||''}
 function live(){if(confirm('БОЕВОЙ режим: бот будет подписывать и отправлять заявки от имени СРО.\nВы уверены?'))act('run_live')}
+async function saveSettings(){const r=await api('/api/settings',{method:'POST',body:JSON.stringify({workers:Number($('workers').value)})});$('msg').textContent=r.msg||''}
 async function saveT(){const r=await api('/api/targets',{method:'POST',body:JSON.stringify({text:$('tg').value})});$('msg').textContent=r.msg}
 async function journal(){const r=await api('/api/journal');const l=$('log');l.textContent+='\n--- журнал ---\n'+r.text;l.scrollTop=l.scrollHeight}
 async function poll(){try{
@@ -264,6 +302,7 @@ async function poll(){try{
  const l=await api('/api/log?since='+since);if(l.lines.length){const e=$('log');const bottom=e.scrollTop+e.clientHeight>=e.scrollHeight-20;
   e.textContent+=l.lines.join('\n')+'\n';if(bottom)e.scrollTop=e.scrollHeight}since=l.total;
 }catch(e){}}
+api('/api/settings').then(r=>{if(r.workers)$('workers').value=r.workers;else $('msg').textContent=r.msg||'Не удалось загрузить настройки'});
 api('/api/targets').then(r=>$('tg').value=r.text);setInterval(poll,1500);poll();
 </script></body></html>"""
 

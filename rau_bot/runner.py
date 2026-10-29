@@ -33,6 +33,7 @@ class Config:
     au: list = field(default_factory=list)  # [{"fio": "...", "email": "..."}, ...]
     journal: str = "journal.csv"
     cdp_url: str = "http://127.0.0.1:9222"
+    workers: int = 1                             # сколько вкладок работает одновременно (1 = как раньше, по очереди)
 
     @classmethod
     def load(cls, path: str) -> "Config":
@@ -113,7 +114,9 @@ class Journal:
     FIELDS = ["time", "inn", "case", "debtor", "event", "points", "detail"]
 
     def __init__(self, path: str):
+        import threading
         self.path = path
+        self._lock = threading.Lock()                 # вкладки пишут в один файл
         self.meta: dict[str, tuple[str, str]] = {}   # ИНН -> (номер дела, должник)
 
     def _rotate_old(self):
@@ -132,14 +135,15 @@ class Journal:
         case, debtor = self.meta.get(str(kw.get("inn", "")), ("", ""))
         row.setdefault("case", case)
         row.setdefault("debtor", debtor)
-        self._rotate_old()
-        new = not _exists(self.path)
-        with open(self.path, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=self.FIELDS)
-            if new:
-                w.writeheader()
-            w.writerow({k: row.get(k, "") for k in w.fieldnames})
-        print(row)
+        with self._lock:
+            self._rotate_old()
+            new = not _exists(self.path)
+            with open(self.path, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=self.FIELDS)
+                if new:
+                    w.writeheader()
+                w.writerow({k: row.get(k, "") for k in w.fieldnames})
+        print(row, flush=True)
 
 
 def _exists(p):
@@ -245,23 +249,28 @@ def lead_for_queue(n_in_window: int, step_s: float = 20.0) -> float:
     return max(0, n_in_window - 1) * step_s
 
 
-def run(cfg: Config, targets: dict[str, "Target"]):
-    from .browser import Cabinet
-    cab = Cabinet(cfg.cdp_url, cfg.tz)
-    print(f"Бот запущен. Дел: {len(targets)}. Режим: "
-          f"{'ТРЕНИРОВКА (без подписи)' if cfg.dry_run else 'БОЕВОЙ (подписывает)'}. Остановка: Ctrl+C")
-    w = Watcher(cfg, cab, Journal(cfg.journal))
+def _sleep(stop, seconds: float):
+    """Спим кусками по секунде, чтобы «Стоп» срабатывал сразу."""
+    end = time.monotonic() + seconds
+    while not stop.is_set() and time.monotonic() < end:
+        time.sleep(min(1.0, max(0.0, end - time.monotonic())))
+
+
+def _worker(cfg: Config, targets: dict, journal: "Journal", stop, new_tab: bool, label: str = ""):
+    """Один «оператор»: своя вкладка, свои дела. С workers=1 работает во вкладке, где вы вошли в кабинет."""
+    from .browser import Cabinet, CaseClosed
+    cab = Cabinet(cfg.cdp_url, cfg.tz, new_tab=new_tab)
+    w = Watcher(cfg, cab, journal)
     active = dict(targets)
     due = {inn: 0.0 for inn in active}              # когда в следующий раз смотреть (time.monotonic)
     try:
-        while active:
-            now = time.monotonic()
-            w.win_s = window_s(cfg, len(targets))     # от общего числа дел, а не от оставшихся
+        while active and not stop.is_set():
+            w.win_s = window_s(cfg, len(targets))     # от числа дел этого оператора, а не от оставшихся
             in_window = [i for i in active if w.end.get(i) and
                          (w.end[i] - w.now()).total_seconds() <= w.win_s]
             w.extra_lead_s = lead_for_queue(len(in_window))
             done_now = set()
-            while True:
+            while not stop.is_set():
                 # каждый раз заново выбираем самое важное из готовых дел (а не идём по кругу до конца списка)
                 ready = [i for i in active if due[i] <= time.monotonic() and i not in done_now]
                 if not ready:
@@ -274,12 +283,11 @@ def run(cfg: Config, targets: dict[str, "Target"]):
                 try:
                     state = w.step(t)
                 except Exception as e:      # ошибка по одному делу не должна ронять остальные
-                    from .browser import CaseClosed
                     if isinstance(e, CaseClosed):
-                        w.j.write(inn=inn, event="skipped", detail=str(e))
+                        journal.write(inn=inn, event="skipped", detail=str(e))
                         del active[inn]      # подать нельзя: дело больше не опрашиваем
                         continue
-                    w.j.write(inn=inn, event="error", detail=repr(e))
+                    journal.write(inn=inn, event="error", detail=repr(e))
                     due[inn] = time.monotonic() + cfg.poll_fast_s
                     continue
                 if state == "done":
@@ -287,9 +295,45 @@ def run(cfg: Config, targets: dict[str, "Target"]):
                     continue
                 left = (w.end[inn] - w.now()).total_seconds() if inn in w.end else 0
                 due[inn] = time.monotonic() + w.delay.get(inn, next_delay(left, cfg, w.win_s))
-            if active:
-                time.sleep(max(1.0, min(due.values()) - time.monotonic()))
-    except KeyboardInterrupt:
-        print("Остановлено.")
+            if active and not stop.is_set():
+                _sleep(stop, max(1.0, min(due.values()) - time.monotonic()))
     finally:
         cab.close()
+
+
+def split_targets(targets: dict, n: int) -> list[dict]:
+    """Раздаём дела операторам по кругу: у каждого перемешаны ранние и поздние."""
+    items = list(targets.items())
+    return [dict(items[i::n]) for i in range(n) if items[i::n]]
+
+
+def run(cfg: Config, targets: dict[str, "Target"]):
+    import threading
+    stop = threading.Event()
+    journal = Journal(cfg.journal)
+    n = max(1, min(int(cfg.workers), len(targets) or 1, 15))
+    print(f"Бот запущен. Дел: {len(targets)}, вкладок: {n}. Режим: "
+          f"{'ТРЕНИРОВКА (без подписи)' if cfg.dry_run else 'БОЕВОЙ (подписывает)'}. Остановка: Ctrl+C", flush=True)
+    try:
+        if n == 1:
+            _worker(cfg, targets, journal, stop, new_tab=False)
+            return
+        threads = []
+        for k, shard in enumerate(split_targets(targets, n), 1):
+            th = threading.Thread(target=_worker_safe, args=(cfg, shard, journal, stop, k), daemon=True)
+            th.start()
+            threads.append(th)
+            time.sleep(1.5)                          # вкладки открываем не одновременно
+        while any(t.is_alive() for t in threads):
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        stop.set()
+        print("Остановлено.", flush=True)
+
+
+def _worker_safe(cfg, shard, journal, stop, k):
+    """Сбой одной вкладки не должен ронять остальные."""
+    try:
+        _worker(cfg, shard, journal, stop, new_tab=True, label=str(k))
+    except BaseException as e:          # noqa: BLE001
+        journal.write(inn="", event="error", detail=f"вкладка {k} остановилась: {e!r}")

@@ -1,6 +1,11 @@
 # Local configuration and target data
 /config.json
+/config.run.json
 /targets.csv
+/au_registry.xlsx
+/protocols/
+/journal*.csv
+/Сводка*.xlsx
 
 # Runtime data
 /journal.csv

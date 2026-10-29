@@ -7,6 +7,7 @@
   "final_window_min": 3,
   "window_s_per_case": 20,
   "max_window_min": 15,
+  "workers": 1,
   "poll_slow_s": 120,
   "poll_fast_s": 15,
   "extra_margin": "0",

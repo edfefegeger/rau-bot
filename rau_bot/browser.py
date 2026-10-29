@@ -91,7 +91,7 @@ class CaseClosed(Exception):
 
 class Cabinet:
     def __init__(self, cdp_url: str = "http://127.0.0.1:9222", tz: str = "Europe/Moscow",
-                 debug_dir: str = "debug", attach: bool = False):
+                 debug_dir: str = "debug", attach: bool = False, new_tab: bool = False):
         """attach=True: работать в уже открытой вкладке (для команды inspect)."""
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
@@ -105,7 +105,10 @@ class Cabinet:
                 "войдите в кабинет и повторите.") from None
         ctx = self._browser.contexts[0]
         rau = [pg for pg in ctx.pages if "rau.nalog.gov.ru" in pg.url]
-        if attach and ctx.pages:
+        if new_tab:                     # отдельная вкладка для параллельной работы (вход в кабинет общий)
+            self.page, self._own = ctx.new_page(), True
+            self.page.goto(SEARCH_URL)
+        elif attach and ctx.pages:
             self.page, self._own = ctx.pages[-1], False
         elif rau:                       # работаем во вкладке, где вы уже вошли в кабинет
             self.page, self._own = rau[-1], False
