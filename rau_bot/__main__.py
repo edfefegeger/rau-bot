@@ -4,7 +4,9 @@
   python -m rau_bot dump <ИНН должника>       сохранить страницу дела для отладки
   python -m rau_bot inspect <имя>             снимок текущей вкладки браузера (скриншот, текст, поля) в debug/
   python -m rau_bot selftest                  проверка связи с браузером и входа в кабинет
+  python -m rau_bot test_tabs [количество]    открыть вкладки сайта для теста без входа
   python -m rau_bot summary [папка] [файл.xlsx]   сводка по протоколам из папки (по умолчанию protocols)
+  python -m rau_bot close_tabs                    закрыть вкладки бота, оставшиеся после «Стоп»
   python -m rau_bot run config.json targets.csv
 """
 import sys
@@ -53,6 +55,22 @@ def main(argv):
         print("вход выполнен:", "ПАСЬКО" in text.upper() or "Баллы" in text)
         print("снимок:", cab.snapshot("selftest"))
         cab.close()
+    elif cmd == "close_tabs":
+        from .browser import Cabinet
+        from .runner import Config
+        print("закрыто вкладок:", Cabinet.close_stale_tabs(Config().cdp_url))
+    elif cmd == "test_tabs":
+        from .browser import Cabinet
+        from .runner import Config
+        try:
+            cfg = Config.load("config.json") if len(argv) < 3 else Config()
+            count = int(argv[2]) if len(argv) > 2 else cfg.workers
+            results = Cabinet.open_test_tabs(count, cfg.cdp_url)
+        except (ValueError, OSError) as e:
+            print(f"Не удалось запустить тест вкладок: {e}")
+            return 1
+        for result in results:
+            print(result)
     elif cmd == "summary":
         from .summary import build_xlsx
         folder = argv[2] if len(argv) > 2 else "protocols"

@@ -114,7 +114,7 @@ def test_read_targets(tmp_path):
                  "4705064314;;;;;;\n"
                  "9999999999;5000;;;;;\n"
                  "1111111111;5;0.1;0.5;;;\n", encoding="utf-8")
-    cfg = Config(au=[{"fio": "ПО УМОЛЧАНИЮ"}])
+    cfg = Config(au=[{"fio": "ПО УМОЛЧАНИЮ"}], registry=str(tmp_path / "нет_реестра.xlsx"))   # не зависим от реального реестра в папке
     t = read_targets(str(f), cfg)
     assert t["7820069323"].max_bid == D("100")             # минимум из 150 и лимита АУ 100
     assert t["7820069323"].au == [{"fio": "ПАСЬКО ОЛЬГА НИКОЛАЕВНА"},
@@ -323,6 +323,9 @@ def test_parallel_workers_cover_all_cases(tmp_path, monkeypatch):
         def __init__(self, *a, new_tab=False, **kw):
             assert new_tab is True                   # параллельные вкладки всегда отдельные
             self.last_avail = None
+        def ready(self): return True
+        @staticmethod
+        def prepare_tabs(url): return 0
         def open_case(self, inn):
             with lock: tabs.add(threading.get_ident())
             return B.CaseInfo(inn, "u", end, [Application("999", D("3"), False, False, "x")], "", "N" + inn, "D")
@@ -346,23 +349,85 @@ def test_parallel_workers_cover_all_cases(tmp_path, monkeypatch):
     assert len(tabs) == 3                                # работало три вкладки
 
 
-def test_runner_allows_fifteen_workers(tmp_path, monkeypatch):
+def test_tabs_that_fail_to_open_do_not_lose_cases(tmp_path, monkeypatch):
+    """Вкладки 2–5 не загрузились: все дела достаются вкладке 1, ничего не теряется."""
     import threading
+    from datetime import datetime, timedelta, timezone
+    import rau_bot.browser as B
     import rau_bot.runner as R
+    from rau_bot.calc import Application
+    from decimal import Decimal as D
+    end = datetime.now(timezone(timedelta(hours=3))) + timedelta(minutes=2)
+    made, sent, lock = [], [], threading.Lock()
 
-    started = []
-    lock = threading.Lock()
+    class FakeCab:
+        def __init__(self, *a, new_tab=False, **kw):
+            with lock:
+                made.append(1)
+                self.idx = len(made)
+            self.last_avail = None
+        def ready(self): return self.idx == 1          # открылась только первая
+        @staticmethod
+        def prepare_tabs(url): return 0
+        def open_case(self, inn):
+            return B.CaseInfo(inn, "u", end, [Application("999", D("3"), False, False, "x")], "", "N", "D")
+        def create_and_send(self, inn, pts, au, dry, chk):
+            with lock: sent.append(inn)
+            return True
+        def close(self): pass
 
-    def fake_worker(cfg, shard, journal, stop, new_tab=False, label=""):
-        with lock:
-            started.append((new_tab, label))
+    monkeypatch.setattr(B, "Cabinet", FakeCab)
+    monkeypatch.setattr(R.time, "sleep", lambda s: None)
+    orig = R.Watcher.step
+    monkeypatch.setattr(R.Watcher, "step", lambda self, t: (orig(self, t), "done")[1])
+    cfg = R.Config(our_inn="7730309884", journal=str(tmp_path / "j.csv"), workers=5, bid_not_before_s=0,
+                   place_initial=False, dry_run=False, check_au_balance=False)
+    tg = {str(i): R.Target(inn=str(i), max_bid=D("200"), initial=D("2"), step=None, au=[]) for i in range(5)}
+    R.run(cfg, tg)
+    assert sorted(sent) == sorted(tg)                    # ни одно дело не потеряно
+    assert len(made) == 5                                # все вкладки проверяются, неоткрывшиеся отбрасываются
+    log = (tmp_path / "j.csv").read_text(encoding="utf-8-sig")
+    assert "не открылась" in log
 
-    monkeypatch.setattr(R, "_worker", fake_worker)
-    monkeypatch.setattr(R.time, "sleep", lambda _: None)
-    cfg = R.Config(journal=str(tmp_path / "j.csv"), workers=15)
-    targets = {str(i): object() for i in range(15)}
 
-    R.run(cfg, targets)
+def test_parallel_tabs_start_after_previous_tab_is_ready(tmp_path, monkeypatch):
+    import threading
+    import rau_bot.browser as B
+    import rau_bot.runner as R
+    from decimal import Decimal as D
 
-    assert len(started) == 15
-    assert all(new_tab for new_tab, _ in started)
+    first_ready = threading.Event()
+    release_first = threading.Event()
+    made = []
+
+    class FakeCab:
+        def __init__(self, *a, new_tab=False, **kw):
+            assert new_tab is True
+            made.append(len(made) + 1)
+            self.idx = made[-1]
+
+        def ready(self):
+            if self.idx == 1:
+                first_ready.set()
+                assert release_first.wait(5)
+            return True
+
+        @staticmethod
+        def prepare_tabs(url): return 0
+
+    monkeypatch.setattr(B, "Cabinet", FakeCab)
+    monkeypatch.setattr(R, "_work", lambda *args: None)
+    cfg = R.Config(journal=str(tmp_path / "j.csv"), workers=2)
+    targets = {str(i): R.Target(str(i), D("1"), []) for i in range(2)}
+    thread = threading.Thread(target=R.run, args=(cfg, targets))
+    thread.start()
+
+    try:
+        assert first_ready.wait(5)
+        assert made == [1]
+    finally:
+        release_first.set()
+        thread.join(5)
+
+    assert not thread.is_alive()
+    assert made == [1, 2]

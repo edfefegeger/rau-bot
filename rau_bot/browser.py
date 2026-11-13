@@ -85,6 +85,12 @@ _CONTROLS_JS = """() => {
 }"""
 
 
+TAB_MARK = "rau_bot_worker"          # метка вкладок бота (window.name), чтобы находить и закрывать «забытые»
+TEST_TAB_MARK = "rau_bot_test_worker"
+ADOPTED_TAB_MARK = "rau_bot_adopted"
+ADOPTED_TAB_BUSY_MARK = "rau_bot_adopted_busy"
+
+
 class CaseClosed(Exception):
     """По делу нельзя подать заявление (приём закончен или процедура уже в другом статусе)."""
 
@@ -106,23 +112,150 @@ class Cabinet:
         ctx = self._browser.contexts[0]
         rau = [pg for pg in ctx.pages if "rau.nalog.gov.ru" in pg.url]
         if new_tab:                     # отдельная вкладка для параллельной работы (вход в кабинет общий)
-            self.page, self._own = ctx.new_page(), True
-            self.page.goto(SEARCH_URL)
+            self.page = self._claim_manual_tab(ctx)
+            self._adopted = self.page is not None
+            self._own = not self._adopted
+            if self.page is None:
+                self.page = ctx.new_page()
+                self._mark()
+            self.page.set_default_navigation_timeout(60000)
+            if not self._adopted:
+                self.page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
+                self._mark()
         elif attach and ctx.pages:
             self.page, self._own = ctx.pages[-1], False
+            self._adopted = False
         elif rau:                       # работаем во вкладке, где вы уже вошли в кабинет
             self.page, self._own = rau[-1], False
+            self._adopted = False
         else:
             self.page, self._own = ctx.new_page(), True
+            self._adopted = False
             self.page.goto(BASE)
         self.tz = tz
         self.debug_dir = debug_dir
         self.last_avail: list[str] = []
         self.page.set_default_timeout(20000)
 
+    def _mark(self):
+        """Помечаем вкладку бота, чтобы при следующем запуске закрыть оставшиеся."""
+        try:
+            mark = ADOPTED_TAB_BUSY_MARK if getattr(self, "_adopted", False) else TAB_MARK
+            self.page.evaluate(f"window.name = '{mark}'")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _claim_manual_tab(ctx):
+        """Claim an available bot tab or an open rau.nalog.gov.ru tab."""
+        for pg in ctx.pages:
+            try:
+                name = pg.evaluate("window.name")
+                if name in (ADOPTED_TAB_MARK, TAB_MARK, TEST_TAB_MARK):
+                    pg.evaluate(f"window.name = '{ADOPTED_TAB_BUSY_MARK}'")
+                    return pg
+                if not name and "rau.nalog.gov.ru" in pg.url:
+                    pg.evaluate(f"window.name = '{ADOPTED_TAB_BUSY_MARK}'")
+                    return pg
+            except Exception:
+                continue
+        return None
+
+    def ready(self) -> bool:
+        """Новая вкладка загрузила форму поиска (две попытки с перезагрузкой). False — вкладка не открылась."""
+        for attempt in range(2):
+            try:
+                self.page.get_by_text("ФИО/Наименование").first.wait_for(timeout=25000)
+                return True
+            except Exception:
+                try:
+                    self.page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=40000)
+                    self._mark()
+                except Exception:
+                    pass
+        return False
+
+    @staticmethod
+    def close_stale_tabs(cdp_url: str = "http://127.0.0.1:9222") -> int:
+        """Закрывает вкладки бота, оставшиеся от прошлого запуска (после «Стоп» они не закрываются сами)."""
+        from playwright.sync_api import sync_playwright
+        closed = 0
+        pw = sync_playwright().start()
+        try:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            for ctx in browser.contexts:
+                for pg in list(ctx.pages):
+                    try:
+                        name = pg.evaluate("window.name")
+                        if name in (TAB_MARK, TEST_TAB_MARK):
+                            pg.close()
+                            closed += 1
+                        elif name == ADOPTED_TAB_BUSY_MARK:
+                            pg.evaluate(f"window.name = '{ADOPTED_TAB_MARK}'")
+                    except Exception:
+                        pass
+        finally:
+            pw.stop()
+        return closed
+
+    @staticmethod
+    def open_test_tabs(count: int, cdp_url: str = "http://127.0.0.1:9222") -> list[str]:
+        """Open visible site tabs to test browser tab startup without requiring cabinet login."""
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 15:
+            raise ValueError("Количество тестовых вкладок должно быть целым числом от 1 до 15")
+        from playwright.sync_api import sync_playwright
+
+        pw = sync_playwright().start()
+        results = []
+        try:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            ctx = browser.contexts[0]
+            for index in range(1, count + 1):
+                try:
+                    page = ctx.new_page()
+                    page.evaluate(f"window.name = '{TEST_TAB_MARK}'")
+                    try:
+                        page.goto(BASE, wait_until="commit", timeout=10000)
+                        results.append(f"Тестовая вкладка {index}: открыта")
+                    except Exception as e:
+                        results.append(f"Тестовая вкладка {index}: создана, но сайт не загрузился: {e}")
+                except Exception as e:
+                    results.append(f"Тестовая вкладка {index}: не удалось создать: {e}")
+        finally:
+            pw.stop()
+        return results
+
+    @staticmethod
+    def prepare_tabs(cdp_url: str = "http://127.0.0.1:9222") -> int:
+        """Make tabs left by a stopped bot available for reuse without closing them."""
+        from playwright.sync_api import sync_playwright
+        prepared = 0
+        pw = sync_playwright().start()
+        try:
+            browser = pw.chromium.connect_over_cdp(cdp_url)
+            for ctx in browser.contexts:
+                for pg in list(ctx.pages):
+                    try:
+                        if pg.evaluate("window.name") in (TAB_MARK, ADOPTED_TAB_BUSY_MARK):
+                            pg.evaluate(f"window.name = '{ADOPTED_TAB_MARK}'")
+                            prepared += 1
+                    except Exception:
+                        pass
+        finally:
+            pw.stop()
+        return prepared
+
     def close(self):
         if self._own:
-            self.page.close()
+            try:
+                self.page.close()
+            except Exception:
+                pass
+        elif getattr(self, "_adopted", False):
+            try:
+                self.page.evaluate(f"window.name = '{ADOPTED_TAB_MARK}'")
+            except Exception:
+                pass
         self._pw.stop()
 
     def snapshot(self, name: str) -> str:
@@ -150,13 +283,18 @@ class Cabinet:
         """Страница «Площадка выбора АУ»: по адресу, запасной путь через меню."""
         p = self.page
         if p.get_by_text("ФИО/Наименование").count() == 0:
-            p.goto(SEARCH_URL)
-            p.wait_for_load_state("networkidle")
+            p.goto(SEARCH_URL, wait_until="domcontentloaded")
+            if self._own:
+                self._mark()
         if p.get_by_text("ФИО/Наименование").count() == 0:
-            item = p.get_by_text("Площадка выбора АУ", exact=True).locator("visible=true")
-            if item.count():
-                item.first.hover()
-                item.last.click()
+            cta = p.get_by_role("link", name="Перейти на площадку", exact=True)
+            if cta.count():
+                cta.first.click()
+            else:
+                item = p.get_by_text("Площадка выбора АУ", exact=True).locator("visible=true")
+                if item.count():
+                    item.first.hover()
+                    item.last.click()
         try:
             p.get_by_text("ФИО/Наименование").first.wait_for(timeout=15000)
         except Exception:

@@ -22,3 +22,18 @@ def test_worker_count_is_saved_to_config(monkeypatch, tmp_path):
 def test_worker_count_rejects_values_outside_supported_range(workers):
     with pytest.raises(ValueError, match="от 1 до 15"):
         panel.set_worker_count(workers)
+
+
+def test_panel_test_tabs_action_uses_saved_worker_count(monkeypatch):
+    calls = []
+
+    class FakeRunner:
+        def start(self, args, mode=""):
+            calls.append((args, mode))
+            return True, "запущено"
+
+    monkeypatch.setattr(panel, "runner", FakeRunner())
+    monkeypatch.setattr(panel, "get_worker_count", lambda: 7)
+
+    assert panel.do_action("test_tabs") == (True, "запущено")
+    assert calls == [(["-m", "rau_bot", "test_tabs", "7"], "Тест вкладок без входа")]

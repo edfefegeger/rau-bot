@@ -256,10 +256,9 @@ def _sleep(stop, seconds: float):
         time.sleep(min(1.0, max(0.0, end - time.monotonic())))
 
 
-def _worker(cfg: Config, targets: dict, journal: "Journal", stop, new_tab: bool, label: str = ""):
-    """Один «оператор»: своя вкладка, свои дела. С workers=1 работает во вкладке, где вы вошли в кабинет."""
-    from .browser import Cabinet, CaseClosed
-    cab = Cabinet(cfg.cdp_url, cfg.tz, new_tab=new_tab)
+def _work(cfg: Config, cab, targets: dict, journal: "Journal", stop):
+    """Рабочий цикл одной вкладки по её делам. Вкладку закрывает по окончании."""
+    from .browser import CaseClosed
     w = Watcher(cfg, cab, journal)
     active = dict(targets)
     due = {inn: 0.0 for inn in active}              # когда в следующий раз смотреть (time.monotonic)
@@ -307,33 +306,89 @@ def split_targets(targets: dict, n: int) -> list[dict]:
     return [dict(items[i::n]) for i in range(n) if items[i::n]]
 
 
+def _tab(cfg: Config, journal: "Journal", stop, k: int, inbox, ready):
+    """Поток одной вкладки: открывает вкладку, сообщает «готова», получает дела и работает."""
+    from .browser import Cabinet
+    try:
+        cab = Cabinet(cfg.cdp_url, cfg.tz, new_tab=True)
+        ok = cab.ready()
+    except BaseException as e:          # noqa: BLE001
+        ready.put((k, False, repr(e)))
+        return
+    ready.put((k, ok, "" if ok else "страница не загрузилась"))
+    shard = inbox.get() if ok else None
+    if not shard:
+        cab.close()
+        return
+    try:
+        _work(cfg, cab, shard, journal, stop)
+    except BaseException as e:          # noqa: BLE001  сбой одной вкладки не роняет остальные
+        journal.write(inn="", event="error", detail=f"вкладка {k} остановилась: {e!r}")
+
+
 def run(cfg: Config, targets: dict[str, "Target"]):
+    import queue
     import threading
+    from .browser import Cabinet
     stop = threading.Event()
     journal = Journal(cfg.journal)
+    try:                                 # вкладки после «Стоп» сохраняем и используем повторно
+        prepared = Cabinet.prepare_tabs(cfg.cdp_url)
+        if prepared:
+            print(f"Для повторного использования подготовлено вкладок: {prepared}", flush=True)
+    except Exception as e:
+        journal.write(inn="", event="error", detail=f"не удалось подготовить вкладки к повторному использованию: {e!r}")
     n = max(1, min(int(cfg.workers), len(targets) or 1, 15))
     print(f"Бот запущен. Дел: {len(targets)}, вкладок: {n}. Режим: "
           f"{'ТРЕНИРОВКА (без подписи)' if cfg.dry_run else 'БОЕВОЙ (подписывает)'}. Остановка: Ctrl+C", flush=True)
     try:
         if n == 1:
-            _worker(cfg, targets, journal, stop, new_tab=False)
+            _work(cfg, Cabinet(cfg.cdp_url, cfg.tz, new_tab=False), targets, journal, stop)
             return
+        inboxes: dict[int, "queue.Queue"] = {}
+        ready: "queue.Queue" = queue.Queue()
         threads = []
-        for k, shard in enumerate(split_targets(targets, n), 1):
-            th = threading.Thread(target=_worker_safe, args=(cfg, shard, journal, stop, k), daemon=True)
+        results = {}
+        answered = set()
+        for k in range(1, n + 1):          # не запускаем несколько навигаций одновременно
+            inboxes[k] = queue.Queue()
+            th = threading.Thread(target=_tab, args=(cfg, journal, stop, k, inboxes[k], ready), daemon=True)
             th.start()
             threads.append(th)
-            time.sleep(1.5)                          # вкладки открываем не одновременно
+            deadline = time.monotonic() + 60   # даём вкладке до минуты завершить загрузку
+            while k not in results and time.monotonic() < deadline:
+                try:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    result = ready.get(timeout=min(1.0, remaining))
+                except queue.Empty:
+                    continue
+                result_k = result[0]
+                if result_k not in answered:
+                    results[result_k] = result
+            answered.add(k)
+            if k not in results:
+                journal.write(inn="", event="error", detail=f"вкладка {k} не загрузилась за минуту, не используем")
+                inboxes[k].put(None)
+                continue
+            _, ok, err = results[k]
+            if ok:
+                continue
+            else:
+                journal.write(inn="", event="error", detail=f"вкладка {k} не открылась: {err}")
+                inboxes[k].put(None)
+        ok_ids = [k for k in range(1, n + 1) if k in results and results[k][1]]
+        ok_ids.sort()
+        if not ok_ids:
+            print("Ни одна вкладка не открылась. Проверьте браузер и вход в кабинет.", flush=True)
+            return
+        for k, shard in zip(ok_ids, split_targets(targets, len(ok_ids))):
+            inboxes[k].put(shard)
+        for k in inboxes:
+            if k not in ok_ids:
+                inboxes[k].put(None)
+        print(f"Работает вкладок: {len(ok_ids)} из {n}. Дел на вкладку около {len(targets) // len(ok_ids)}", flush=True)
         while any(t.is_alive() for t in threads):
             time.sleep(0.5)
     except KeyboardInterrupt:
         stop.set()
         print("Остановлено.", flush=True)
-
-
-def _worker_safe(cfg, shard, journal, stop, k):
-    """Сбой одной вкладки не должен ронять остальные."""
-    try:
-        _worker(cfg, shard, journal, stop, new_tab=True, label=str(k))
-    except BaseException as e:          # noqa: BLE001
-        journal.write(inn="", event="error", detail=f"вкладка {k} остановилась: {e!r}")

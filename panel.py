@@ -128,6 +128,14 @@ def journal_tail(n=40):
 def do_action(name):
     if name == "browser":
         return runner.start([os.path.join(HERE, "launcher.py"), "browser"])
+    if name == "test_tabs":
+        try:
+            count = get_worker_count()
+        except (OSError, ValueError) as e:
+            return False, f"Ошибка настроек вкладок: {e}"
+        return runner.start(["-m", "rau_bot", "test_tabs", str(count)], mode="Тест вкладок без входа")
+    if name == "close_tabs":
+        return runner.start(["-m", "rau_bot", "close_tabs"])
     if name in ("selftest", "check"):
         return runner.start(["-m", "rau_bot", name])
     if name in ("run_dry", "run_live"):
@@ -259,18 +267,20 @@ pre{height:260px;overflow:auto;margin:0;white-space:pre-wrap}textarea{height:150
 
 <div class="card"><h2>Подготовка</h2><div class="row">
 <button onclick="act('browser')"><span class="step">1</span> Открыть браузер</button>
+<button onclick="act('test_tabs')">Тест вкладок без входа</button>
 <button onclick="act('selftest')"><span class="step">2</span> Проверить вход в кабинет</button></div>
-<p class="hint">В открывшемся окне войдите в кабинет РАУ через МЧД, затем нажмите «Проверить вход».</p></div>
+<p class="hint">Чтобы проверить только открытие вкладок, сначала запустите браузер, задайте их число в настройках ниже, затем нажмите «Тест вкладок без входа». Авторизация не нужна. Для работы бота войдите в кабинет и нажмите «Проверить вход».</p></div>
 
 <div class="card"><h2>Работа</h2><div class="row">
 <button class="p" id="bd" onclick="act('run_dry')">▶ Тренировка (без подписи)</button>
 <button class="live" id="bl" onclick="live()">▶ БОЕВОЙ режим (подписывает)</button>
-<button onclick="act('stop')">■ Стоп</button></div>
+<button onclick="act('stop')">■ Стоп</button>
+<button onclick="act('close_tabs')">Закрыть лишние вкладки бота</button></div>
 <div class="row" style="margin-top:12px">
 <label for="workers">Вкладок одновременно:</label>
 <input id="workers" type="number" min="1" max="15" step="1" value="1" style="width:90px">
 <button onclick="saveSettings()">Сохранить</button></div>
-<p class="hint">Число вкладок сохраняется в config.json и применяется при следующем запуске.</p>
+<p class="hint">Число вкладок сохраняется в config.json и применяется при следующем запуске. Рекомендуем 4–6: на сайте много вкладок грузятся долго. Если вкладки не загрузились, остановите бота, вручную откройте нужное число вкладок на странице поиска и запустите снова — бот их использует. Вкладки после «Стоп» остаются открытыми и используются повторно.</p>
 <p class="hint">Тренировка заполняет форму и считает ставку, но ничего не отправляет. Боевой режим подписывает и отправляет заявки.</p>
 <div id="msg"></div></div>
 
